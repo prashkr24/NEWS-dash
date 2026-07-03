@@ -75,6 +75,12 @@ class MapRenderer(private val tiles: TileProvider) {
     private val etaSmallPaint  = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(196, 201, 208); textSize = 12f; textAlign = Paint.Align.CENTER }
     // GPS-health pill (top-centre, shown only when the signal is weak/lost)
     private val gpsPillText    = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 13f; isFakeBoldText = true; textAlign = Paint.Align.CENTER }
+    // Provider attribution (bottom-right). Required visible by Mappls' T&C; drawn for both
+    // sources. White with a dark shadow so it reads on any map colour without a pill.
+    private val attributionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 10f; color = Color.WHITE; textAlign = Paint.Align.RIGHT
+        setShadowLayer(2f, 0f, 1f, Color.argb(200, 0, 0, 0))
+    }
 
     // Reused across frames
     private val routePath = Path()
@@ -240,6 +246,9 @@ class MapRenderer(private val tiles: TileProvider) {
 
         // No other on-map text overlays — the dash's own widgets show name/turn, and the
         // round bezel clips anything near the top edge.
+
+        // ── Provider attribution (bottom-right; Mappls T&C requires it stays visible) ──
+        canvas.drawText(tiles.source.attribution, w - 6f, h - 6f, attributionPaint)
 
         // ── Standby when nothing to show (dark text on the light map bg) ──
         if (f.riderLat == null && f.destLat == null) {
