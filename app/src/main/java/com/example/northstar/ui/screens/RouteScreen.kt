@@ -264,6 +264,10 @@ fun RouteScreen(
             )
 
             val canStart = dest?.lat != null && dest.lng != null && !routeState.isResolving
+
+            // Quick dash-map switch right where you launch — mirrors Settings → Dash map.
+            MapProviderQuickToggle(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp))
+
             NorthstarBtn(
                 label = when {
                     sent                   -> "Starting navigation…"

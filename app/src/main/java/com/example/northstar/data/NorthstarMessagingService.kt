@@ -55,7 +55,7 @@ class NorthstarMessagingService : FirebaseMessagingService() {
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
-                    "Northstar notifications",
+                    "WayDash notifications",
                     NotificationManager.IMPORTANCE_DEFAULT,
                 )
             )

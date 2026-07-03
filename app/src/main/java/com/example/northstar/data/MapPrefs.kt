@@ -20,7 +20,7 @@ object MapPrefs {
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun tileSource(context: Context): TileSource =
-        TileSource.fromId(prefs(context).getString(KEY_TILE_SOURCE, null))
+        TileSource.fromId(prefs(context).getString(KEY_TILE_SOURCE, TileSource.MAPPLS.id))
 
     fun setTileSource(context: Context, source: TileSource) {
         prefs(context).edit().putString(KEY_TILE_SOURCE, source.id).apply()

@@ -636,7 +636,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             offRoute = false,
             followMode = true,
         ) }
-        session.updateRouteCard("Northstar")   // dash card → name + 0.0 km, nav off
+        session.updateRouteCard("WayDash")   // dash card → name + 0.0 km, nav off
     }
 
     /** Compute the road route now (while internet is reachable) and cache it. */

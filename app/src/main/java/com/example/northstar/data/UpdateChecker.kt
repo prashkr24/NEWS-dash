@@ -26,9 +26,9 @@ object UpdateChecker {
     private const val TAG = "UpdateChecker"
     // The repo whose Releases we track. Keep in sync with the README download link.
     private const val LATEST_RELEASE_API =
-        "https://api.github.com/repos/adityadasika21/NorthStar/releases/latest"
+        "https://api.github.com/repos/prashkr24/NEWS-dash/releases/latest"
     private const val RELEASES_PAGE =
-        "https://github.com/adityadasika21/NorthStar/releases/latest"
+        "https://github.com/prashkr24/NEWS-dash/releases/latest"
 
     data class ReleaseInfo(
         val versionName: String,   // tag without a leading "v", e.g. "1.2"

@@ -140,7 +140,7 @@ fun HomeScreen(
                     Spacer(Modifier.height(12.dp))
 
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        NorthstarChip("Himalayan 450", ChipTone.Gold, icon = NorthstarIcons.Motor)
+                        NorthstarChip("Guerrilla 450", ChipTone.Gold, icon = NorthstarIcons.Motor)
                     }
                 }
             }

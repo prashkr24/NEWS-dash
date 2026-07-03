@@ -37,7 +37,7 @@ class DashSession(private val scope: CoroutineScope) {
         // STOP for this long the dash is gone (out of range / powered off) — but over UDP there's no
         // socket error, so without this watchdog the app streams into the void showing "connected".
         private const val RX_WATCHDOG_MS = 6_000L
-        private const val HOSTNAME       = "Northstar"
+        private const val HOSTNAME       = "WayDash"
     }
 
     private val _state = MutableStateFlow(DashState.IDLE)
@@ -56,7 +56,7 @@ class DashSession(private val scope: CoroutineScope) {
     var onButton: ((Byte) -> Unit)? = null
     var onError:  ((String) -> Unit)? = null
 
-    @Volatile var destinationName: String = "Northstar"
+    @Volatile var destinationName: String = "WayDash"
 
     private var sessionJob: Job? = null
     private var rxJob: Job? = null
@@ -144,7 +144,7 @@ class DashSession(private val scope: CoroutineScope) {
     fun sendRtp(packet: ByteArray) { socket?.sendRtp(packet) }
 
     fun updateRouteCard(name: String) {
-        destinationName = name.ifBlank { "Northstar" }
+        destinationName = name.ifBlank { "WayDash" }
         navActive = false   // new destination — old figures are stale until the next updateNavInfo
         if (_state.value == DashState.READY || _state.value == DashState.STREAMING) {
             scope.launch(Dispatchers.IO) {

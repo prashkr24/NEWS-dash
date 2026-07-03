@@ -37,7 +37,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.northstar.app"
+        applicationId = "com.waydash.app"
         // API 29 (Android 10) is the real floor: the dash link is built on WifiNetworkSpecifier
         // + ConnectivityManager.requestNetwork(specifier), both added in API 29, and that IS the
         // app. Below 29 the core feature can't run and the unguarded calls would crash, so we
@@ -47,8 +47,8 @@ android {
         // 1.3.1 = hotfix for the MapLibre page-switch SIGSEGV that shipped in 1.3.0 (code 12).
         // NEWS-dash fork starts its own version line. Alpha until the joystick +
         // card-UI roadmap lands. Bump versionCode by 1 on every build you install.
-        versionCode = 1
-        versionName = "0.1.0-alpha"
+        versionCode = 2
+        versionName = "0.2.0-rc1"
 
         // Test-channel telemetry: ride/connection diagnostics upload to Firestore so logs can be
         // pulled remotely (no adb) while iterating on test builds. MUST be flipped to "false" for
