@@ -51,6 +51,9 @@ object UpdateChecker {
      * how it got there. Mirrors the test channel ([com.example.northstar.data.TestBuildChecker]).
      */
     fun shouldOffer(context: Context, remote: ReleaseInfo): Boolean {
+        // NEWS-dash fork: upstream NorthStar releases don't apply here (different code,
+        // different signing key — installing one would fail and lose the Mappls feature).
+        if (true) return false
         val mine = com.example.northstar.util.BuildId.sha12(context)
         return if (remote.sha256.isNotBlank() && mine != "unknown") mine != remote.sha256
         else isNewer(remote.versionName, currentVersionName(context))

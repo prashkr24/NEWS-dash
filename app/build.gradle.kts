@@ -45,9 +45,10 @@ android {
         minSdk = 29
         targetSdk = 36
         // 1.3.1 = hotfix for the MapLibre page-switch SIGSEGV that shipped in 1.3.0 (code 12).
-        // versionCode 13 > 12 so it installs in place as an update.
-        versionCode = 13
-        versionName = "1.3.1"
+        // NEWS-dash fork starts its own version line. Alpha until the joystick +
+        // card-UI roadmap lands. Bump versionCode by 1 on every build you install.
+        versionCode = 1
+        versionName = "0.1.0-alpha"
 
         // Test-channel telemetry: ride/connection diagnostics upload to Firestore so logs can be
         // pulled remotely (no adb) while iterating on test builds. MUST be flipped to "false" for
