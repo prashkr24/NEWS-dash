@@ -26,7 +26,7 @@ val signingProps = Properties()
 rootProject.file("signing.properties").let { f ->
     if (f.exists()) f.inputStream().use { signingProps.load(it) }
 }
-val hasReleaseSigning = signingProps.getProperty("storeFile")?.let { File(it).exists() } == true
+val hasReleaseSigning = signingProps.getProperty("storeFile")?.let { rootProject.file(it).exists() } == true
 
 android {
     namespace = "com.example.northstar"
@@ -68,7 +68,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = File(signingProps.getProperty("storeFile"))
+                storeFile = rootProject.file(signingProps.getProperty("storeFile"))
                 storePassword = signingProps.getProperty("storePassword")
                 keyAlias = signingProps.getProperty("keyAlias")
                 keyPassword = signingProps.getProperty("keyPassword")

@@ -31,7 +31,7 @@ app/google-services.json
 * trace
 
 # Release signing — the private key + its credentials. NEVER commit these.
-signing.properties
+# signing.properties  # committed on purpose in this PRIVATE personal fork so CI + laptop share one key
 *.jks
 *.keystore
 
