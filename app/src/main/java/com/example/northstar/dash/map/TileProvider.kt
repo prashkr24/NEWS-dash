@@ -319,8 +319,13 @@ class TileProvider(
         val max = 1 shl z
         if (y < 0 || y >= max) return null
 
-        // ── Batched path (Mappls): one 512×512 image = the whole 2×2 block ──
+        // Snapshot source + key + dir together so a mid-fetch switch can't write a tile
+        // from provider A into provider B's cache directory.
         val src = source
+        val dir = diskDir
+        val keyForSrc = if (src.requiresApiKey) apiKey else null
+
+        // ── Batched path (Mappls): one 512×512 image = the whole 2×2 block ──
         if (src.blockUrl(z, 0, 0, "probe") != null && z <= src.maxZoom) {
             fetchBlock(z, x, y)?.let { return it }
             // fall through to single-tile fetch if the block path failed
@@ -332,11 +337,6 @@ class TileProvider(
         if (wait > 0) try { Thread.sleep(wait) } catch (_: InterruptedException) {}
         lastFetchAt = System.currentTimeMillis()
 
-        // Snapshot source + key + dir together so a mid-fetch switch can't write a tile
-        // from provider A into provider B's cache directory.
-        val src = source
-        val dir = diskDir
-        val keyForSrc = if (src.requiresApiKey) apiKey else null
         if (src.requiresApiKey && keyForSrc == null) {
             Log.w(TAG, "Tile $key skipped — ${src.displayName} needs an API key")
             return null
