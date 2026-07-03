@@ -1,8 +1,8 @@
 name: Build APK
 
 # Builds a signed release APK in the cloud on every push to main
-# (or manually from the Actions tab → Build APK → Run workflow).
-# Download it afterwards from the run page → Artifacts → NEWS-dash-apk.
+# (or manually from the Actions tab â†’ Build APK â†’ Run workflow).
+# Download it afterwards from the run page â†’ Artifacts â†’ NEWS-dash-apk.
 
 on:
   push:
