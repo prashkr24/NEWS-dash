@@ -1,5 +1,9 @@
 package com.example.northstar.ui.navigation
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -250,16 +254,22 @@ private fun NorthstarBottomNav(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xE60D0F11))
-            .border(width = 1.dp, color = Line, shape = androidx.compose.ui.graphics.RectangleShape)
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .background(Color(0xF01A2129))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
             .navigationBarsPadding(),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         bottomTabs.forEach { tab ->
             val active = currentRoute == tab.screen.route
+            // M3E nav: a filled pill grows behind the active tab's icon.
+            val pillAlpha by animateFloatAsState(
+                if (active) 1f else 0f,
+                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                label = "nav-pill",
+            )
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
                 modifier = Modifier
                     .weight(1f)
                     .clickable(
@@ -268,30 +278,24 @@ private fun NorthstarBottomNav(
                     ) { onNavSelect(tab.screen) }
                     .padding(vertical = 6.dp),
             ) {
-                // Fixed-height container with the icon top-aligned and the active dot
-                // bottom-aligned — so reserving space for the dot doesn't shove the
-                // selected icon downward relative to the others.
-                Box(Modifier.height(29.dp), contentAlignment = Alignment.TopCenter) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .width(58.dp).height(32.dp)
+                        .clip(CircleShape)
+                        .background(Brava.copy(alpha = pillAlpha * 0.20f)),
+                ) {
                     Icon(
                         tab.icon, contentDescription = tab.label,
-                        tint = if (active) Gold else TextLo,
+                        tint = if (active) BravaBright else TextLo,
                         modifier = Modifier.size(23.dp),
                     )
-                    if (active) {
-                        Box(
-                            Modifier
-                                .align(Alignment.BottomCenter)
-                                .size(4.dp)
-                                .clip(CircleShape)
-                                .background(Gold)
-                        )
-                    }
                 }
                 Text(
                     tab.label,
-                    color = if (active) Gold else TextLo,
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    color = if (active) BravaBright else TextLo,
+                    fontSize = 11.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                     fontFamily = GeistFamily,
                 )
             }

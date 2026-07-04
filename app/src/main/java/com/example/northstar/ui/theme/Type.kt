@@ -16,10 +16,12 @@ private val provider = GoogleFont.Provider(
 )
 
 val GeistFamily = FontFamily(
-    Font(googleFont = GoogleFont("Geist"), fontProvider = provider, weight = FontWeight.Normal),
-    Font(googleFont = GoogleFont("Geist"), fontProvider = provider, weight = FontWeight.Medium),
-    Font(googleFont = GoogleFont("Geist"), fontProvider = provider, weight = FontWeight.SemiBold),
-    Font(googleFont = GoogleFont("Geist"), fontProvider = provider, weight = FontWeight.Bold),
+    // WayDash Health-idiom body/display: Google Sans Flex-like rounded geometric sans.
+    // (Figtree reads very close to Google's own product sans — friendly, geometric, legible.)
+    Font(googleFont = GoogleFont("Figtree"), fontProvider = provider, weight = FontWeight.Normal),
+    Font(googleFont = GoogleFont("Figtree"), fontProvider = provider, weight = FontWeight.Medium),
+    Font(googleFont = GoogleFont("Figtree"), fontProvider = provider, weight = FontWeight.SemiBold),
+    Font(googleFont = GoogleFont("Figtree"), fontProvider = provider, weight = FontWeight.Bold),
 )
 
 val GeistMonoFamily = FontFamily(
