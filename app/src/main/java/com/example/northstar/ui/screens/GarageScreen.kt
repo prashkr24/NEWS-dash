@@ -107,7 +107,7 @@ fun GarageScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(18.dp)
-            .padding(bottom = 24.dp),
+            .padding(bottom = 110.dp),
     ) {
         ScreenHeader(
             eyebrow = "Guerrilla 450 · ${"%,.1f".format(ui.odometerKm)} km",

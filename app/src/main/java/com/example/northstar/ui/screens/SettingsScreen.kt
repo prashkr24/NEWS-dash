@@ -65,7 +65,7 @@ fun SettingsScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(18.dp)
-            .padding(bottom = 24.dp),
+            .padding(bottom = 110.dp),
     ) {
         ScreenHeader(title = "Settings", onBack = onBack,
             hint = "Connection, screen-off streaming, voice guidance, units, and media/call permissions.")

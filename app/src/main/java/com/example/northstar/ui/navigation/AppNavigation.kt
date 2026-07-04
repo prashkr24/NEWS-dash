@@ -5,6 +5,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -140,8 +142,8 @@ fun AppNavigation(
         }
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        Box(Modifier.weight(1f)) {
+    Box(Modifier.fillMaxSize().statusBarsPadding()) {
+        Box(Modifier.fillMaxSize()) {
             NavHost(
                 navController = navController,
                 startDestination = startDest,
@@ -242,10 +244,15 @@ fun AppNavigation(
         com.example.northstar.ui.components.UpdatePrompt()
 
         if (showBottomNav) {
-            NorthstarBottomNav(
-                currentRoute = currentRoute,
-                onNavSelect = { screen -> navigateTab(screen.route) },
-            )
+            Box(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                NorthstarBottomNav(
+                    currentRoute = currentRoute,
+                    onNavSelect = { screen -> navigateTab(screen.route) },
+                )
+            }
         }
     }
 }
@@ -257,15 +264,17 @@ private fun NorthstarBottomNav(
 ) {
     Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xF01A2129))
-            .padding(horizontal = 10.dp, vertical = 6.dp)
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .shadow(16.dp, RoundedCornerShape(percent = 50), clip = false)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(Color(0xF2222C35))
+            .border(1.dp, Line2, RoundedCornerShape(percent = 50))
+            .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         bottomTabs.forEach { tab ->
             val active = currentRoute == tab.screen.route
-            // M3E nav: a filled pill grows behind the active tab's icon.
             val pillAlpha by animateFloatAsState(
                 if (active) 1f else 0f,
                 spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
@@ -273,21 +282,20 @@ private fun NorthstarBottomNav(
             )
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier
-                    .weight(1f)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) { onNavSelect(tab.screen) }
-                    .padding(vertical = 6.dp),
+                    .padding(horizontal = 6.dp),
             ) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .width(58.dp).height(32.dp)
+                        .width(54.dp).height(34.dp)
                         .clip(CircleShape)
-                        .background(Brava.copy(alpha = pillAlpha * 0.20f)),
+                        .background(Brava.copy(alpha = pillAlpha * 0.22f)),
                 ) {
                     Icon(
                         tab.icon, contentDescription = tab.label,
@@ -298,7 +306,7 @@ private fun NorthstarBottomNav(
                 Text(
                     tab.label,
                     color = if (active) BravaBright else TextLo,
-                    fontSize = 11.sp,
+                    fontSize = 10.5.sp,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                     fontFamily = GeistFamily,
                 )

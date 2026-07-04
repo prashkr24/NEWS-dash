@@ -146,7 +146,7 @@ fun RouteScreen(
                 .background(Bg1)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 8.dp)
-                .padding(bottom = 20.dp),
+                .padding(bottom = 110.dp),
         ) {
             // Drag handle
             Box(

@@ -68,7 +68,7 @@ data class DashUiState(
 )
 
 class DashViewModel(app: Application) : AndroidViewModel(app) {
-    private val _ui = MutableStateFlow(DashUiState())
+    private val _ui = MutableStateFlow(DashUiState(mapZoom = com.example.northstar.data.DashPrefs.zoom(app)))
     val ui = _ui.asStateFlow()
 
     // The EXACT frame being H.264-encoded to the dash, published for the in-app "Dash view"
@@ -117,7 +117,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var route: Route? = null
     @Volatile private var panX = 0f
     @Volatile private var panY = 0f
-    @Volatile private var zoom = 19          // nav-level zoom on the dash (street-level default)
+    @Volatile private var zoom = com.example.northstar.data.DashPrefs.zoom(app)  // restored last-used zoom (persists across close/upgrade)
     @Volatile private var headingUp = true
     @Volatile private var followMode = true
     @Volatile private var lastManualPanAt = 0L
@@ -667,6 +667,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val clamped = z.coerceIn(11, 20)
         if (clamped == zoom) return
         zoom = clamped
+        com.example.northstar.data.DashPrefs.setZoom(getApplication(), clamped)
         _ui.update { it.copy(mapZoom = zoom) }
         // Make zoom feel instant: force a redraw on the very next tick (the renderer bridges the
         // gap with scaled neighbouring-zoom tiles), and warm the real tiles for the new level so
