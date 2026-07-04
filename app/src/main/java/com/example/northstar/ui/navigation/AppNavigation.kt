@@ -54,7 +54,8 @@ private val bottomTabs = listOf(
     NavTab(Screen.Home,   NorthstarIcons.Home,    "Home"),
     NavTab(Screen.Route,  NorthstarIcons.Navi,    "Route"),
     NavTab(Screen.Dash,   NorthstarIcons.Dash,    "Dash"),
-    NavTab(Screen.Garage, NorthstarIcons.Wrench,  "Garage"),
+    // Garage hidden for now — re-enable by uncommenting this line (screen code kept intact).
+    // NavTab(Screen.Garage, NorthstarIcons.Wrench,  "Garage"),
     NavTab(Screen.Rides,  NorthstarIcons.History, "Rides"),
 )
 
