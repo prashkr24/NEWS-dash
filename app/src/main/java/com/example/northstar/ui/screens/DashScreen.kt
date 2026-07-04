@@ -37,7 +37,7 @@ import com.example.northstar.viewmodel.DashViewModel
 import kotlinx.coroutines.delay
 
 @Composable
-fun DashScreen(vm: DashViewModel = viewModel()) {
+fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {}) {
     val ui by vm.ui.collectAsState()
     val previewFrame by vm.previewFrame.collectAsState()
     val context = LocalContext.current
@@ -452,38 +452,67 @@ fun DashScreen(vm: DashViewModel = viewModel()) {
 
         Spacer(Modifier.height(16.dp))
 
-        // Controls: joystick + zoom (drive the actual dash map)
+        // Pan pad (full width) — drives the actual dash map in adjust mode
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(28.dp))
+                .background(Surf1)
+                .padding(vertical = 16.dp, horizontal = 12.dp),
+        ) {
+            Joystick(
+                size = 128.dp,
+                onMove = { v -> joystickVelocity = if (adjustMode) v else Offset.Zero },
+            )
+            Spacer(Modifier.height(9.dp))
+            Eyebrow("Pan")
+        }
+
+        Spacer(Modifier.height(18.dp))
+
+        // ── M3E floating toolbar: all dash actions in one pill ──
+        // zoom out · zoom level · zoom in · recenter │ settings · power-FAB
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .clip(RoundedCornerShape(percent = 50))
+                .background(Surf2)
+                .padding(8.dp),
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Surf1)
-                    .border(1.dp, Line, RoundedCornerShape(18.dp))
-                    .padding(vertical = 16.dp, horizontal = 12.dp),
-            ) {
-                Joystick(
-                    size = 128.dp,
-                    onMove = { v -> joystickVelocity = if (adjustMode) v else Offset.Zero },
-                )
-                Spacer(Modifier.height(9.dp))
-                Eyebrow("Pan")
-            }
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                NorthstarIconBtn(NorthstarIcons.Plus,  onClick = { vm.zoomIn() },  size = 52.dp)
-                Text("z${ui.mapZoom}", color = Gold, fontSize = 12.sp, fontFamily = GeistMonoFamily, fontWeight = FontWeight.SemiBold)
-                NorthstarIconBtn(NorthstarIcons.Minus, onClick = { vm.zoomOut() }, size = 52.dp)
-                NorthstarIconBtn(NorthstarIcons.Recenter, onClick = { vm.recenter(); pan = Offset.Zero }, size = 52.dp, active = true)
-            }
+            NorthstarIconBtn(NorthstarIcons.Minus, onClick = { vm.zoomOut() }, size = 46.dp)
+            Text(
+                "z${ui.mapZoom}", color = BravaBright, fontSize = 12.sp,
+                fontFamily = GeistMonoFamily, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 2.dp),
+            )
+            NorthstarIconBtn(NorthstarIcons.Plus, onClick = { vm.zoomIn() }, size = 46.dp)
+            NorthstarIconBtn(NorthstarIcons.Recenter, onClick = { vm.recenter(); pan = Offset.Zero }, size = 46.dp)
+            // separator
+            Box(Modifier.width(1.dp).height(28.dp).background(Line2))
+            NorthstarIconBtn(NorthstarIcons.Gear, onClick = onOpenSettings, size = 46.dp)
+            // Power FAB: connect when offline (same permission-aware flow as the
+            // Connect card), disconnect when streaming.
+            NorthstarIconBtn(
+                NorthstarIcons.Power,
+                onClick = {
+                    when {
+                        streaming -> vm.disconnect()
+                        ui.needsWifiOn -> runCatching {
+                            context.startActivity(
+                                android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI)
+                            )
+                        }
+                        hasEssentialPermissions() -> connectWithBackgroundCheck()
+                        else -> permissionLauncher.launch(requestedPermissions)
+                    }
+                },
+                size = 56.dp,
+                active = !streaming,
+                tint = if (streaming) Alert else null,
+            )
         }
 
         // Exit navigation → free roam (keeps streaming, just drops the route)
@@ -499,17 +528,6 @@ fun DashScreen(vm: DashViewModel = viewModel()) {
             )
         }
 
-        // Disconnect button when streaming
-        if (streaming) {
-            Spacer(Modifier.height(20.dp))
-            NorthstarBtn(
-                "Disconnect",
-                onClick = { vm.disconnect() },
-                icon = NorthstarIcons.Power,
-                variant = BtnVariant.Danger,
-                size = BtnSize.Md,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
+        // (Disconnect now lives in the floating toolbar's power button.)
     }
 }

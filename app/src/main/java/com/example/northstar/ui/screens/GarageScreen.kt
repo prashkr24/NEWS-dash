@@ -110,7 +110,7 @@ fun GarageScreen(
             .padding(bottom = 24.dp),
     ) {
         ScreenHeader(
-            eyebrow = "Himalayan 450 · ${"%,.1f".format(ui.odometerKm)} km",
+            eyebrow = "Guerrilla 450 · ${"%,.1f".format(ui.odometerKm)} km",
             title = "Garage",
             hint = "Track maintenance, fuel fill-ups and mileage, and service-due reminders. Tap Odometer to keep the distance current.",
             trailing = {
@@ -683,7 +683,7 @@ private fun GloveboxTab(
     }
 
     Spacer(Modifier.height(20.dp))
-    Eyebrow("Reference · Himalayan 450", Modifier.padding(bottom = 8.dp, start = 4.dp))
+    Eyebrow("Reference · Guerrilla 450", Modifier.padding(bottom = 8.dp, start = 4.dp))
     NorthstarCard(modifier = Modifier.fillMaxWidth()) {
         SpecRow("Tyre pressure", "32 psi front & rear")
         SpecRow("Engine oil", "10W40 API SN / JASO MA2 · 2.1 L")

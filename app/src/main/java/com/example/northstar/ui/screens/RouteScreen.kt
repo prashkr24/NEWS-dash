@@ -170,7 +170,7 @@ fun RouteScreen(
                             Text("Start a route from Google Maps", color = TextHi, fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
                             Text(
-                                "Open Google Maps → pick a place → tap Share → choose Northstar. " +
+                                "Open Google Maps → pick a place → tap Share → choose WayDash. " +
                                     "The destination lands here, then tap Start navigation to send it to the dash.",
                                 color = TextMid, fontSize = 13.sp, fontFamily = GeistFamily,
                                 modifier = Modifier.padding(top = 4.dp),

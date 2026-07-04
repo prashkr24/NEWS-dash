@@ -202,7 +202,10 @@ fun AppNavigation(
                 }
 
                 composable(Screen.Dash.route) {
-                    DashScreen(vm = dashViewModel)
+                    DashScreen(
+                        vm = dashViewModel,
+                        onOpenSettings = { navController.navigate(Screen.Settings.route) },
+                    )
                 }
 
                 composable(Screen.Garage.route) {
