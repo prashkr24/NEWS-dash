@@ -37,8 +37,8 @@ fun HomeScreen(
 ) {
     val saved by routeViewModel.saved.collectAsState()
     val status = when (conn) {
-        ConnectionState.Connected -> Triple("Connected", "Streaming to Tripper Dash", Gold)
-        ConnectionState.Searching -> Triple("Searching…", "Looking for Tripper Dash", Warn)
+        ConnectionState.Connected -> Triple("Connected", "Streaming to Tripper Dash", Brava)
+        ConnectionState.Searching -> Triple("Searching…", "Looking for Tripper Dash", Amber)
         ConnectionState.Offline   -> Triple("Offline", "Dash not detected", Offline)
     }
     val (statusLabel, statusSub, statusDot) = status

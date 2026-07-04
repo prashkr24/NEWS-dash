@@ -224,7 +224,7 @@ fun SettingsScreen(
 
         val appVersion = remember { com.example.northstar.data.UpdateChecker.currentVersionName(ctx) }
         Text(
-            "NORTHSTAR v$appVersion · ${if (!auth.syncAvailable) "local only" else if (auth.isSignedIn) "sync on" else "sync off"}",
+            "WAYDASH v$appVersion · ${if (!auth.syncAvailable) "local only" else if (auth.isSignedIn) "sync on" else "sync off"}",
             color = TextDis, fontSize = 11.sp, fontFamily = GeistMonoFamily,
             modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 10.dp),
         )

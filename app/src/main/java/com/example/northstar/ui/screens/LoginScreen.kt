@@ -105,7 +105,7 @@ fun LoginScreen(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "NORTHSTAR",
+                        "WAYDASH",
                         color = TextHi,
                         fontFamily = GeistMonoFamily,
                         fontWeight = FontWeight.Bold,
@@ -119,7 +119,7 @@ fun LoginScreen(
                 Spacer(Modifier.height(12.dp))
 
                 Text(
-                    "Your Himalayan's co-pilot.\nRoutes to the dash, eyes on the road.",
+                    "Your ride's co-pilot.\nRoutes to the dash, eyes on the road.",
                     color = TextMid,
                     fontSize = 14.sp,
                     lineHeight = 21.sp,
