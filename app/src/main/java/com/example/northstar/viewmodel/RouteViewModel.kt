@@ -31,6 +31,10 @@ data class RouteState(
     val route: Route? = null,
     val alternatives: List<Route> = emptyList(),
     val selectedRoute: Int = 0,
+    /** Which engine served the routes ("TomTom" / "OSRM"); null before first compute. */
+    val routingEngine: String? = null,
+    /** Alert when the preferred engine failed (e.g. daily limit) and we fell back. */
+    val routingNotice: String? = null,
     val routing: Boolean = false,
     val distanceText: String? = null,   // "218 km"
     val durationText: String? = null,   // "4h 50m"
@@ -144,11 +148,12 @@ class RouteViewModel(app: Application) : AndroidViewModel(app) {
 
         _state.value = _state.value.copy(routing = true)
         viewModelScope.launch {
-            val alts = com.example.northstar.dash.nav.RoutingHub.routes(
+            val outcome = com.example.northstar.dash.nav.RoutingHub.routesDetailed(
                 getApplication(),
                 GeoPoint(origin.latitude, origin.longitude),
                 GeoPoint(destLat, destLng),
             )
+            val alts = outcome.routes
             val r = alts.firstOrNull()
             _state.value = if (r != null) {
                 com.example.northstar.dash.nav.RoutePlanHolder.route = r
@@ -156,12 +161,17 @@ class RouteViewModel(app: Application) : AndroidViewModel(app) {
                     route = r,
                     alternatives = alts,
                     selectedRoute = 0,
+                    routingEngine = outcome.engine,
+                    routingNotice = outcome.notice,
                     routing = false,
                     distanceText = fmtKm(r.totalMeters),
                     durationText = fmtDuration(r.totalSeconds),
                     etaText = fmtEta(r.totalSeconds),
                 )
-            } else _state.value.copy(routing = false, alternatives = emptyList())
+            } else _state.value.copy(
+                routing = false, alternatives = emptyList(),
+                routingEngine = outcome.engine, routingNotice = outcome.notice,
+            )
         }
     }
 

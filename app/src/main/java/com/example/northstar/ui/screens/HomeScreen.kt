@@ -97,53 +97,55 @@ fun HomeScreen(
             }
         }
 
-        // Connection hero card
+        // Connection hero card — mockup layout: bike chip pinned top-right, glowing
+        // dash illustration beside a big "Tripper Dash" title, status stacked below.
         NorthstarCard(
             glow = conn == ConnectionState.Connected,
             padding = 20.dp,
             modifier = Modifier.fillMaxWidth(),
         ) {
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Spacer(Modifier.width(0.dp))
+                NorthstarChip("Guerrilla 450", ChipTone.Gold, icon = NorthstarIcons.Motor)
+            }
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularDash(
-                    size = 118.dp,
+                    size = 110.dp,
                     pan = Offset.Zero,
                     zoom = 1f,
                     compact = true,
                     live = conn == ConnectionState.Connected,
                 )
-
                 Spacer(Modifier.width(18.dp))
-
-                Column(Modifier.weight(1f)) {
-                    Eyebrow("Tripper Dash")
-
-                    Spacer(Modifier.height(7.dp))
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(9.dp).clip(CircleShape).background(
-                                statusDot.copy(alpha = if (conn == ConnectionState.Connected) pulseAlpha else 1f)
-                            )
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            statusLabel, color = TextHi, fontSize = 19.sp,
-                            fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
-                            letterSpacing = (-0.38).sp,
-                        )
-                    }
-
-                    Spacer(Modifier.height(4.dp))
-
-                    Text(statusSub, color = TextMid, fontSize = 13.sp)
-
-                    Spacer(Modifier.height(12.dp))
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        NorthstarChip("Guerrilla 450", ChipTone.Gold, icon = NorthstarIcons.Motor)
-                    }
-                }
+                Text(
+                    "Tripper\nDash", color = TextHi, fontSize = 34.sp,
+                    fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
+                    letterSpacing = (-1).sp, lineHeight = 38.sp,
+                )
             }
+
+            Spacer(Modifier.height(14.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(9.dp).clip(CircleShape).background(
+                        statusDot.copy(alpha = if (conn == ConnectionState.Connected) pulseAlpha else 1f)
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    statusLabel, color = BravaBright, fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
+                    letterSpacing = (-0.38).sp,
+                )
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(statusSub, color = TextHi, fontSize = 15.sp, fontWeight = FontWeight.Medium)
         }
 
         Spacer(Modifier.height(18.dp))

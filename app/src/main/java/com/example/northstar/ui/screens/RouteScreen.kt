@@ -142,7 +142,7 @@ fun RouteScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .offset(y = (-22).dp)
-                .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                .clip(ShapeSheetTop)
                 .background(Bg1)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 8.dp)
@@ -158,6 +158,14 @@ fun RouteScreen(
             )
 
             Spacer(Modifier.height(12.dp))
+
+            // Big sheet header (mockup language)
+            Text(
+                "Destination", color = TextHi, fontSize = 26.sp,
+                fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
+                letterSpacing = (-0.5).sp,
+                modifier = Modifier.padding(bottom = 12.dp, start = 2.dp),
+            )
 
             // No destination yet → tell the rider exactly how to start one. A route ALWAYS begins by
             // sharing a place from Google Maps into Northstar; there's no in-app search by design.
@@ -237,10 +245,50 @@ fun RouteScreen(
             Spacer(Modifier.height(20.dp))
 
             // ── Route alternatives: rider picks which way to go (like Google Maps'
-            // grey alternate routes). Section shows whenever a route exists; single-
-            // route trips get an explanatory note instead of silence. ──
+            // grey alternate routes). Header names the engine that actually served
+            // these routes; an amber alert appears if the preferred provider failed
+            // (e.g. daily limit) and we fell back. ──
             if (routeState.alternatives.isNotEmpty()) {
-                Eyebrow("Choose route", Modifier.padding(bottom = 9.dp, start = 4.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 9.dp),
+                ) {
+                    Eyebrow("Choose route", Modifier.padding(start = 4.dp))
+                    routeState.routingEngine?.let { eng ->
+                        val traffic = eng == "TomTom"
+                        Text(
+                            if (traffic) "$eng · live traffic" else "$eng · free-flow",
+                            color = if (traffic) BravaBright else TextLo,
+                            fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                            fontFamily = GeistMonoFamily,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(if (traffic) BravaTint else Surf1)
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
+                    }
+                }
+                routeState.routingNotice?.let { notice ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Amber.copy(alpha = 0.14f))
+                            .border(1.dp, Amber.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                    ) {
+                        Text("⚠", color = Amber, fontSize = 14.sp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            notice, color = Amber, fontSize = 12.5.sp,
+                            lineHeight = 17.sp, fontWeight = FontWeight.Medium,
+                            fontFamily = GeistFamily,
+                        )
+                    }
+                }
                 if (routeState.alternatives.size == 1) {
                     Text(
                         "Only one route found for this trip — alternatives appear when the routing engine finds meaningfully different options.",

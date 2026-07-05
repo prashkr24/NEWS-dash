@@ -17,6 +17,10 @@ import java.net.URL
  */
 object TomTomRouter {
     private const val TAG = "TomTomRouter"
+
+    /** HTTP code of the most recent failed call (0 = none/success). 403/429 = quota. */
+    @Volatile var lastFailureCode: Int = 0
+        private set
     private const val BASE = "https://api.tomtom.com/routing/1/calculateRoute"
     private const val UA = "WayDash/0.7 (personal motorcycle nav; single user)"
 
@@ -36,11 +40,14 @@ object TomTomRouter {
                     ?.use { it.readBytes().toString(Charsets.UTF_8) }.orEmpty()
                 conn.disconnect()
                 if (code !in 200..299) {
+                    lastFailureCode = code
                     Log.w(TAG, "HTTP $code: ${body.take(200)}")
                     return@withContext emptyList()
                 }
+                lastFailureCode = 0
                 parse(body).also { Log.i(TAG, "TomTom returned ${it.size} route(s)") }
             } catch (e: Exception) {
+                lastFailureCode = -1  // network / no response
                 Log.w(TAG, "routes() failed: ${e.message}")
                 emptyList()
             }
