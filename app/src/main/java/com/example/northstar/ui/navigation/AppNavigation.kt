@@ -47,6 +47,7 @@ sealed class Screen(val route: String) {
     object Dash     : Screen("dash")
     object Garage   : Screen("garage")
     object Rides    : Screen("rides")
+    object Discovery: Screen("discovery")
     object Settings : Screen("settings")
 }
 
@@ -56,6 +57,7 @@ private val bottomTabs = listOf(
     NavTab(Screen.Home,   NorthstarIcons.Home,    "Home"),
     NavTab(Screen.Route,  NorthstarIcons.Navi,    "Route"),
     NavTab(Screen.Dash,   NorthstarIcons.Dash,    "Dash"),
+    NavTab(Screen.Discovery, NorthstarIcons.Bt,    "Signals"),
     // Garage hidden for now — re-enable by uncommenting this line (screen code kept intact).
     // NavTab(Screen.Garage, NorthstarIcons.Wrench,  "Garage"),
     NavTab(Screen.Rides,  NorthstarIcons.History, "Rides"),
@@ -101,7 +103,7 @@ fun AppNavigation(
 
     val showBottomNav = currentRoute in listOf(
         Screen.Home.route, Screen.Route.route, Screen.Dash.route,
-        Screen.Garage.route, Screen.Rides.route,
+        Screen.Garage.route, Screen.Rides.route, Screen.Discovery.route,
     )
 
     val garageTab by appViewModel.garageTab.collectAsState()
@@ -222,6 +224,10 @@ fun AppNavigation(
                     RidesScreen()
                 }
 
+                composable(Screen.Discovery.route) {
+                    com.example.northstar.ui.screens.DiscoveryScreen()
+                }
+
                 composable(Screen.Settings.route) {
                     SettingsScreen(
                         conn = conn,
@@ -265,7 +271,7 @@ private fun NorthstarBottomNav(
     Row(
         modifier = Modifier
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .padding(horizontal = 12.dp, vertical = 12.dp)
             .shadow(16.dp, RoundedCornerShape(percent = 50), clip = false)
             .clip(RoundedCornerShape(percent = 50))
             .background(Color(0xF2222C35))
@@ -288,7 +294,7 @@ private fun NorthstarBottomNav(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) { onNavSelect(tab.screen) }
-                    .padding(horizontal = 6.dp),
+                    .padding(horizontal = 3.dp),
             ) {
                 Box(
                     contentAlignment = Alignment.Center,

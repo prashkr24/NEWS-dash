@@ -317,6 +317,10 @@ class DashSession(private val scope: CoroutineScope) {
             if (tlv.type == 0x09 && tlv.sub == 0x00 && tlv.value.isNotEmpty()) {
                 val btn = tlv.value.last()  // 0900 0001 <code>
                 Log.i(TAG, "JOYSTICK 09 00 → code 0x${(btn.toInt() and 0xFF).toString(16).uppercase()}  full=${tlv.value.toHexFull()}")
+                com.example.northstar.data.DiscoveryLog.record(
+                    com.example.northstar.data.DiscoveryLog.Kind.JOYSTICK,
+                    tlv.type, tlv.sub, tlv.value.size, tlv.value.toHexFull(),
+                )
                 sock.send(DashCommands.buttonAck(btn))
                 scope.launch(Dispatchers.Main) { onButton?.invoke(btn) }
                 continue
@@ -334,18 +338,30 @@ class DashSession(private val scope: CoroutineScope) {
                 Log.i(TAG, "DASH TELEMETRY 0F sub=0x%02X enc(%dB)=%s  dec=%s".format(
                     tlv.sub, tlv.value.size, tlv.value.toHexFull(),
                     plain?.toHexFull() ?: "<key=${key != null}; decrypt failed>"))
+                com.example.northstar.data.DiscoveryLog.record(
+                    com.example.northstar.data.DiscoveryLog.Kind.TELEMETRY_ENC,
+                    tlv.type, tlv.sub, tlv.value.size, tlv.value.toHexFull(), plain?.toHexFull(),
+                )
                 continue
             }
             // ── 0C xx: dash → app telemetry (trip/odo/fuel/temp — P1b) ──
             if (tlv.type == 0x0C) {
                 Log.i(TAG, "DASH TELEMETRY 0C sub=0x%02X (%dB) val=%s"
                     .format(tlv.sub, tlv.value.size, tlv.value.toHexFull()))
+                com.example.northstar.data.DiscoveryLog.record(
+                    com.example.northstar.data.DiscoveryLog.Kind.TELEMETRY_PLAIN,
+                    tlv.type, tlv.sub, tlv.value.size, tlv.value.toHexFull(),
+                )
                 continue
             }
             // Log every OTHER incoming event (e.g. joystick in nav view, or the dash's
             // 'exit navigation' selection) in FULL so its TLV can be identified + mapped.
             Log.i(TAG, "DASH EVENT type=0x%02X sub=0x%02X (%dB) val=%s"
                 .format(tlv.type, tlv.sub, tlv.value.size, tlv.value.toHexFull()))
+            com.example.northstar.data.DiscoveryLog.record(
+                com.example.northstar.data.DiscoveryLog.Kind.UNKNOWN,
+                tlv.type, tlv.sub, tlv.value.size, tlv.value.toHexFull(),
+            )
         }
     }
 

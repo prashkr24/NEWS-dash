@@ -5,4 +5,6 @@
     <files-path name="documents" path="documents/" />
     <!-- Downloaded APK handed to the system package installer by the in-app updater. -->
     <cache-path name="updates" path="updates/" />
+    <!-- Dash-link capture exports shared from the Signals screen. -->
+    <cache-path name="captures" path="captures/" />
 </paths>
