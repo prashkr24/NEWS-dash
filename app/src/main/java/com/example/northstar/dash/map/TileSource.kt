@@ -39,7 +39,7 @@ enum class TileSource(
 
     MAPPLS(
         id = "mappls",
-        displayName = "Mappls (MapmyIndia)",
+        displayName = "Mappls · Beta",
         attribution = "© Mappls | MapmyIndia",
         cacheNamespace = "tiles_mappls_v2", // v2: still_image-based tiles
         requiresApiKey = true,

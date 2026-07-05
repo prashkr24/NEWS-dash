@@ -35,6 +35,8 @@ data class Maneuver(
     val location: GeoPoint,
     /** Cumulative distance (m) from the route start to this maneuver's location. */
     val cumulativeMeters: Double,
+    /** True when this step is a flyover/elevated road (detected from OSM naming). */
+    val flyover: Boolean = false,
 ) {
     /** Dash maneuver glyph byte. CONTINUE (0x0B) is the only verified value. */
     val dashCode: Int get() = 0x0B // TODO: verify other glyph codes on fw 11.63
@@ -48,6 +50,8 @@ data class Route(
     val totalSeconds: Double,
     /** Cumulative distance (m) at each geometry vertex — same length as [geometry]. */
     val cumulative: DoubleArray,
+    /** Human route summary from OSRM (main road names, e.g. "NH 44; ORR"). */
+    val summary: String = "",
 ) {
     val destination: GeoPoint? get() = geometry.lastOrNull()
 }

@@ -75,6 +75,9 @@ class MapRenderer(private val tiles: TileProvider) {
     private val etaSmallPaint  = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(196, 201, 208); textSize = 12f; textAlign = Paint.Align.CENTER }
     // GPS-health pill (top-centre, shown only when the signal is weak/lost)
     private val gpsPillText    = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 13f; isFakeBoldText = true; textAlign = Paint.Align.CENTER }
+    // Flyover/maneuver hint chip — amber guidance pill (Google-tooltip-like).
+    private val flyoverBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(244, 183, 64) }
+    private val flyoverText    = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 14f; isFakeBoldText = true; textAlign = Paint.Align.CENTER }
     // Provider attribution (bottom-right). Required visible by Mappls' T&C; drawn for both
     // sources. White with a dark shadow so it reads on any map colour without a pill.
     private val attributionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -242,6 +245,24 @@ class MapRenderer(private val tiles: TileProvider) {
             canvas.drawRoundRect(pillRect, r, r, etaBgPaint)
             canvas.drawRoundRect(pillRect, r, r, etaBorderPaint)
             canvas.drawText(label, cxp, top + padV - fm.ascent, gpsPillText)
+        }
+
+        // ── Maneuver hint chip (e.g. "Take the flyover · 250 m") — Google-Maps-style
+        // tooltip for flyover steps. Amber fill so it reads as guidance, positioned in
+        // the top-centre safe zone below the GPS pill slot. ──
+        f.maneuverText?.let { label ->
+            flyoverText.color = Color.rgb(20, 16, 4)
+            val padH = 16f; val padV = 7f
+            val fm = flyoverText.fontMetrics
+            val textH = fm.descent - fm.ascent
+            val pillW = flyoverText.measureText(label) + padH * 2
+            val cxp = w / 2f
+            val top = if (f.gpsLost || f.gpsWeak) 52f else 16f
+            val bottom = top + padV * 2 + textH
+            pillRect.set(cxp - pillW / 2f, top, cxp + pillW / 2f, bottom)
+            val r = (bottom - top) / 2f
+            canvas.drawRoundRect(pillRect, r, r, flyoverBgPaint)
+            canvas.drawText(label, cxp, top + padV - fm.ascent, flyoverText)
         }
 
         // No other on-map text overlays — the dash's own widgets show name/turn, and the

@@ -17,9 +17,16 @@ object Router {
     private const val BASE = "https://router.project-osrm.org/route/v1/driving"
     private const val UA = "Northstar/1.0 (personal motorcycle nav; single user)"
 
-    suspend fun route(from: GeoPoint, to: GeoPoint): Route? = withContext(Dispatchers.IO) {
+    /** Best single route (first alternative) — kept for existing callers. */
+    suspend fun route(from: GeoPoint, to: GeoPoint): Route? = routes(from, to).firstOrNull()
+
+    /**
+     * Up to 3 route alternatives (OSRM `alternatives`). Index 0 is OSRM's preferred
+     * route; the rest are meaningfully different options the rider can pick from.
+     */
+    suspend fun routes(from: GeoPoint, to: GeoPoint): List<Route> = withContext(Dispatchers.IO) {
         val url = "$BASE/${from.lng},${from.lat};${to.lng},${to.lat}" +
-                "?overview=full&geometries=polyline&steps=true&annotations=false"
+                "?overview=full&geometries=polyline&steps=true&annotations=false&alternatives=3"
         try {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 setRequestProperty("User-Agent", UA)
@@ -28,22 +35,26 @@ object Router {
             }
             val body = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
             conn.disconnect()
-            parse(body)
+            parseAll(body)
         } catch (e: Exception) {
-            Log.w(TAG, "route() failed: ${e.message}")
-            null
+            Log.w(TAG, "routes() failed: ${e.message}")
+            emptyList()
         }
     }
 
-    private fun parse(json: String): Route? {
+    private fun parseAll(json: String): List<Route> {
         val root = JSONObject(json)
         if (root.optString("code") != "Ok") {
             Log.w(TAG, "OSRM code=${root.optString("code")}")
-            return null
+            return emptyList()
         }
-        val routes = root.optJSONArray("routes") ?: return null
-        if (routes.length() == 0) return null
-        val r0 = routes.getJSONObject(0)
+        val routes = root.optJSONArray("routes") ?: return emptyList()
+        return (0 until routes.length()).mapNotNull { i ->
+            runCatching { parseOne(routes.getJSONObject(i)) }.getOrNull()
+        }
+    }
+
+    private fun parseOne(r0: JSONObject): Route? {
 
         val geometry = PolylineCodec.decode(r0.getString("geometry"))
         if (geometry.size < 2) return null
@@ -67,24 +78,31 @@ object Router {
                     val p = GeoPoint(loc.getDouble(1), loc.getDouble(0))
                     val type = ManeuverType.fromOsrm(man.optString("type"), man.optString("modifier"))
                     val name = step.optString("name").ifBlank { "road" }
+                    // India-specific: elevated roads are almost always named "... Flyover" in
+                    // OSM. Surfacing this mirrors Google Maps' "Take flyover" tooltip.
+                    val flyover = name.contains("flyover", ignoreCase = true)
                     maneuvers.add(
                         Maneuver(
                             type = type,
-                            instruction = buildInstruction(type, name),
+                            instruction = if (flyover) "Take the flyover" else buildInstruction(type, name),
                             location = p,
                             cumulativeMeters = nearestCumulative(p, geometry, cum),
+                            flyover = flyover,
                         )
                     )
                 }
             }
         }
 
+        val summary = r0.optJSONArray("legs")
+            ?.optJSONObject(0)?.optString("summary").orEmpty()
         return Route(
             geometry = geometry,
             maneuvers = maneuvers,
             totalMeters = r0.optDouble("distance", cum.last()),
             totalSeconds = r0.optDouble("duration", 0.0),
             cumulative = cum,
+            summary = summary,
         )
     }
 

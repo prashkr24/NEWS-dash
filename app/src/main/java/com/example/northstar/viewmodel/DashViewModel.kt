@@ -117,7 +117,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var route: Route? = null
     @Volatile private var panX = 0f
     @Volatile private var panY = 0f
-    @Volatile private var zoom = com.example.northstar.data.DashPrefs.zoom(app)  // restored last-used zoom (persists across close/upgrade)
+    @Volatile private var zoom = com.example.northstar.data.DashPrefs.zoom(app)
+    // Next-maneuver snapshot for the dash frame (flyover hint), updated by trackProgress.
+    @Volatile private var lastNextManeuver: com.example.northstar.dash.nav.Maneuver? = null
+    @Volatile private var lastNextTurnM: Double = Double.MAX_VALUE  // restored last-used zoom (persists across close/upgrade)
     @Volatile private var headingUp = true
     @Volatile private var followMode = true
     @Volatile private var lastManualPanAt = 0L
@@ -647,7 +650,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val r = Router.route(GeoPoint(loc.latitude, loc.longitude), GeoPoint(destLatV, destLngV))
+            // Prefer the alternative the rider picked on the Route screen, if it matches
+            // this destination; otherwise fetch fresh.
+            val r = com.example.northstar.dash.nav.RoutePlanHolder.takeIfMatches(destLatV, destLngV)
+                ?: Router.route(GeoPoint(loc.latitude, loc.longitude), GeoPoint(destLatV, destLngV))
             if (r != null) {
                 route = r
                 tiles.prefetchRoute(r.geometry)
@@ -844,6 +850,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         if (r != null && loc != null) {
             val ns = trackProgress(r, GeoPoint(loc.latitude, loc.longitude))
             remainingM = ns.remainingM
+            lastNextManeuver = ns.nextManeuver
+            lastNextTurnM = ns.nextTurnM
             // Heading-aware off-route. A flyover (or its service road) runs PARALLEL to and almost
             // on top of the route, so flat GPS can sit well past the lateral threshold while the
             // rider is still effectively on the line. Distance alone then cries "off-route" and
@@ -1160,7 +1168,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             destLng = destLng,
             destName = _ui.value.destinationName,
             route = route?.geometry ?: emptyList(),
-            maneuverText = null, // turn-by-turn maneuver banner removed
+            // "Take flyover"-style hint (Google-Maps-like): only for flyover steps,
+            // only when close (<= 400 m). Normal turns stay off the map (native bubble
+            // handles those) to keep the frame clean.
+            maneuverText = lastNextManeuver?.takeIf { it.flyover && lastNextTurnM <= 400.0 }
+                ?.let { "Take the flyover · ${fmtDist(lastNextTurnM)}" },
             remainingText = remainingM?.let { fmtDist(it) },
             // Top-down (heading-up) nav view. The 3D perspective tilt is DISABLED: warping
             // flat raster tiles via setPolyToPoly stretches the baked-in map labels and

@@ -72,8 +72,8 @@ fun MapProviderSection(onSourceChanged: (TileSource) -> Unit = {}) {
                         when (src) {
                             TileSource.GOOGLE -> "Best POI detail · no key needed"
                             TileSource.MAPPLS -> if (mapplsKey.isBlank())
-                                "Indian road data · tap to add REST key"
-                            else "Indian road data · key saved"
+                                "Indian road data · Beta · tap to add REST key"
+                            else "Indian road data · Beta · daily free limit applies"
                         },
                         color = TextLo, fontSize = 11.5.sp, modifier = Modifier.padding(top = 2.dp),
                     )

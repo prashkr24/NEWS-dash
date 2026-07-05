@@ -29,6 +29,8 @@ data class RouteState(
     val pendingNavigate: Boolean = false,
     // Real routing results
     val route: Route? = null,
+    val alternatives: List<Route> = emptyList(),
+    val selectedRoute: Int = 0,
     val routing: Boolean = false,
     val distanceText: String? = null,   // "218 km"
     val durationText: String? = null,   // "4h 50m"
@@ -142,18 +144,38 @@ class RouteViewModel(app: Application) : AndroidViewModel(app) {
 
         _state.value = _state.value.copy(routing = true)
         viewModelScope.launch {
-            val r = Router.route(
+            val alts = Router.routes(
                 GeoPoint(origin.latitude, origin.longitude),
                 GeoPoint(destLat, destLng),
             )
-            _state.value = if (r != null) _state.value.copy(
-                route = r,
-                routing = false,
-                distanceText = fmtKm(r.totalMeters),
-                durationText = fmtDuration(r.totalSeconds),
-                etaText = fmtEta(r.totalSeconds),
-            ) else _state.value.copy(routing = false)
+            val r = alts.firstOrNull()
+            _state.value = if (r != null) {
+                com.example.northstar.dash.nav.RoutePlanHolder.route = r
+                _state.value.copy(
+                    route = r,
+                    alternatives = alts,
+                    selectedRoute = 0,
+                    routing = false,
+                    distanceText = fmtKm(r.totalMeters),
+                    durationText = fmtDuration(r.totalSeconds),
+                    etaText = fmtEta(r.totalSeconds),
+                )
+            } else _state.value.copy(routing = false, alternatives = emptyList())
         }
+    }
+
+    /** Rider picked a different route alternative on the planning screen. */
+    fun selectRoute(index: Int) {
+        val alts = _state.value.alternatives
+        val r = alts.getOrNull(index) ?: return
+        com.example.northstar.dash.nav.RoutePlanHolder.route = r
+        _state.value = _state.value.copy(
+            route = r,
+            selectedRoute = index,
+            distanceText = fmtKm(r.totalMeters),
+            durationText = fmtDuration(r.totalSeconds),
+            etaText = fmtEta(r.totalSeconds),
+        )
     }
 
     fun onNavigated() { _state.value = _state.value.copy(pendingNavigate = false) }

@@ -236,6 +236,54 @@ fun RouteScreen(
 
             Spacer(Modifier.height(20.dp))
 
+            // ── Route alternatives: rider picks which way to go (like Google Maps'
+            // grey alternate routes). Only shown when OSRM returned more than one. ──
+            if (routeState.alternatives.size > 1) {
+                Eyebrow("Choose route", Modifier.padding(bottom = 9.dp, start = 4.dp))
+                routeState.alternatives.forEachIndexed { i, alt ->
+                    val active = i == routeState.selectedRoute
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(if (active) BravaTint else Surf1)
+                            .border(
+                                1.5.dp,
+                                if (active) Brava else Line,
+                                RoundedCornerShape(18.dp),
+                            )
+                            .clickable { routeViewModel.selectRoute(i) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (alt.summary.isNotBlank()) "via ${alt.summary}" else "Route ${i + 1}",
+                                color = if (active) BravaBright else TextHi,
+                                fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                                fontFamily = GeistFamily,
+                            )
+                            Text(
+                                "%.0f km · %s".format(
+                                    alt.totalMeters / 1000.0,
+                                    (alt.totalSeconds / 60.0).toInt().let { m ->
+                                        if (m >= 60) "${m / 60}h ${m % 60}m" else "${m}m"
+                                    },
+                                ),
+                                color = TextMid, fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                        if (active) Text(
+                            "SELECTED", color = BravaBright, fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold, fontFamily = GeistMonoFamily,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
