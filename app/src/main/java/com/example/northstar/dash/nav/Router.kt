@@ -25,9 +25,19 @@ object Router {
      * route; the rest are meaningfully different options the rider can pick from.
      */
     suspend fun routes(from: GeoPoint, to: GeoPoint): List<Route> = withContext(Dispatchers.IO) {
+        // Primary attempt asks for alternatives; if the server rejects the parameter or
+        // errors, retry the plain single-route request so routing never silently breaks.
+        fetchRoutes(from, to, withAlternatives = true).ifEmpty {
+            Log.w(TAG, "alternatives request empty/failed — retrying single-route")
+            fetchRoutes(from, to, withAlternatives = false)
+        }
+    }
+
+    private fun fetchRoutes(from: GeoPoint, to: GeoPoint, withAlternatives: Boolean): List<Route> {
         val url = "$BASE/${from.lng},${from.lat};${to.lng},${to.lat}" +
-                "?overview=full&geometries=polyline&steps=true&annotations=false&alternatives=3"
-        try {
+                "?overview=full&geometries=polyline&steps=true&annotations=false" +
+                if (withAlternatives) "&alternatives=true" else ""
+        return try {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 setRequestProperty("User-Agent", UA)
                 connectTimeout = 10_000
@@ -35,9 +45,9 @@ object Router {
             }
             val body = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
             conn.disconnect()
-            parseAll(body)
+            parseAll(body).also { Log.i(TAG, "OSRM returned ${it.size} route(s) (alts=$withAlternatives)") }
         } catch (e: Exception) {
-            Log.w(TAG, "routes() failed: ${e.message}")
+            Log.w(TAG, "fetchRoutes(alts=$withAlternatives) failed: ${e.message}")
             emptyList()
         }
     }

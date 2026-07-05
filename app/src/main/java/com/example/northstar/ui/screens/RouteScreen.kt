@@ -237,9 +237,17 @@ fun RouteScreen(
             Spacer(Modifier.height(20.dp))
 
             // ── Route alternatives: rider picks which way to go (like Google Maps'
-            // grey alternate routes). Only shown when OSRM returned more than one. ──
-            if (routeState.alternatives.size > 1) {
+            // grey alternate routes). Section shows whenever a route exists; single-
+            // route trips get an explanatory note instead of silence. ──
+            if (routeState.alternatives.isNotEmpty()) {
                 Eyebrow("Choose route", Modifier.padding(bottom = 9.dp, start = 4.dp))
+                if (routeState.alternatives.size == 1) {
+                    Text(
+                        "Only one route found for this trip — alternatives appear when the routing engine finds meaningfully different options.",
+                        color = TextLo, fontSize = 12.sp, lineHeight = 16.sp,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+                    )
+                }
                 routeState.alternatives.forEachIndexed { i, alt ->
                     val active = i == routeState.selectedRoute
                     Row(
