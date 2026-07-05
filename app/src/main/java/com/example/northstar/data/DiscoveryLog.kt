@@ -44,10 +44,32 @@ object DiscoveryLog {
     private val _recording = MutableStateFlow(false)
     val recording: StateFlow<Boolean> = _recording
 
+    /** Latest value + change-count per telemetry field key (e.g. "0C/24"), for the live monitor. */
+    data class FieldState(
+        val key: String,
+        val hex: String,
+        val decimal: Long,
+        val sizeBytes: Int,
+        val changes: Int,
+        val lastMs: Long,
+    )
+    private val _fields = MutableStateFlow<Map<String, FieldState>>(emptyMap())
+    val fields: StateFlow<Map<String, FieldState>> = _fields
+
+    /** Most recent joystick button code (e.g. "13"), for on-the-spot direction mapping. */
+    private val _lastButton = MutableStateFlow<String?>(null)
+    val lastButton: StateFlow<String?> = _lastButton
+    private val _lastButtonMs = MutableStateFlow(0L)
+    val lastButtonMs: StateFlow<Long> = _lastButtonMs
+
     fun setRecording(on: Boolean) { _recording.value = on }
     fun toggleRecording() { _recording.value = !_recording.value }
 
-    fun clear() { _packets.value = emptyList() }
+    fun clear() {
+        _packets.value = emptyList()
+        _fields.value = emptyMap()
+        _lastButton.value = null
+    }
 
     /** Called from DashSession for every inbound TLV. No-op unless recording. */
     fun record(
@@ -55,9 +77,30 @@ object DiscoveryLog {
         rawHex: String, decodedHex: String? = null,
     ) {
         if (!_recording.value) return
-        val p = Packet(System.currentTimeMillis(), kind, type, sub, sizeBytes, rawHex, decodedHex)
+        val now = System.currentTimeMillis()
+        val p = Packet(now, kind, type, sub, sizeBytes, rawHex, decodedHex)
         val cur = _packets.value
         _packets.value = (if (cur.size >= MAX) cur.drop(cur.size - MAX + 1) else cur) + p
+
+        // Live telemetry field table (0C plaintext + 0F decoded).
+        if (kind == Kind.TELEMETRY_PLAIN || kind == Kind.TELEMETRY_ENC) {
+            val key = "%02X/%02X".format(type, sub)
+            val hex = (decodedHex ?: rawHex).replace(" ", "").ifBlank { "00" }
+            val dec = hex.toLongOrNull(16) ?: 0L
+            val prev = _fields.value[key]
+            val changed = prev != null && prev.hex != hex
+            _fields.value = _fields.value + (key to FieldState(
+                key = key, hex = hex, decimal = dec, sizeBytes = sizeBytes,
+                changes = (prev?.changes ?: 0) + if (changed) 1 else 0,
+                lastMs = now,
+            ))
+        }
+
+        // Live joystick code for on-the-spot direction labelling.
+        if (kind == Kind.JOYSTICK) {
+            _lastButton.value = rawHex.trim().takeLast(2).uppercase()
+            _lastButtonMs.value = now
+        }
     }
 
     /** Distinct joystick button codes seen so far, in first-seen order (the mapping goal). */

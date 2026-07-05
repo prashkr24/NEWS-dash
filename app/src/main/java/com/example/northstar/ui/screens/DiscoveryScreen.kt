@@ -36,7 +36,11 @@ fun DiscoveryScreen() {
     val context = LocalContext.current
     val packets by DiscoveryLog.packets.collectAsState()
     val recording by DiscoveryLog.recording.collectAsState()
+    val fields by DiscoveryLog.fields.collectAsState()
+    val lastButton by DiscoveryLog.lastButton.collectAsState()
+    val lastButtonMs by DiscoveryLog.lastButtonMs.collectAsState()
     var filter by remember { mutableStateOf("All") }
+    var mode by remember { mutableStateOf("Live") }  // Live monitor vs raw Log
 
     val filters = listOf("All", "Joystick", "Telemetry", "Unknown")
     val shown = remember(packets, filter) {
@@ -87,70 +91,132 @@ fun DiscoveryScreen() {
 
         Spacer(Modifier.height(14.dp))
 
-        // Joystick code helper — the headline goal of this screen
-        NorthstarCard(padding = 16.dp, modifier = Modifier.fillMaxWidth()) {
-            Text(
-                "Joystick codes seen", color = TextHi, fontSize = 15.sp,
-                fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
-            )
-            Spacer(Modifier.height(4.dp))
-            if (codes.isEmpty()) {
-                Text(
-                    if (recording)
-                        "Press each joystick direction (up/down/left/right/click). Codes will appear here."
-                    else "Tap Record, then press the joystick while connected to the dash.",
-                    color = TextMid, fontSize = 12.5.sp, lineHeight = 17.sp,
-                )
-            } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    codes.forEach { code ->
-                        Text(
-                            "0x$code", color = BravaBright, fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold, fontFamily = GeistMonoFamily,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(percent = 50))
-                                .background(BravaTint)
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                        )
-                    }
-                }
-            }
-        }
+        // Live monitor vs raw Log toggle
+        NorthstarSegmented(
+            options = listOf("Live", "Log"),
+            selected = mode,
+            onSelect = { mode = it },
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         Spacer(Modifier.height(14.dp))
 
-        // Filter chips
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            filters.forEach { f ->
-                val active = f == filter
+        if (mode == "Live") {
+            // ── Big last-joystick indicator: press a direction, read its code, label it. ──
+            val fresh = lastButton != null &&
+                (System.currentTimeMillis() - lastButtonMs) < 4000
+            NorthstarCard(
+                glow = fresh, padding = 16.dp, modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Last joystick press", color = TextMid, fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        lastButton?.let { "0x$it" } ?: "—",
+                        color = if (fresh) BravaBright else TextHi,
+                        fontSize = 40.sp, fontWeight = FontWeight.Bold, fontFamily = GeistMonoFamily,
+                        letterSpacing = (-1).sp,
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    if (codes.isNotEmpty()) {
+                        Column {
+                            Text("seen so far", color = TextLo, fontSize = 10.sp, fontFamily = GeistMonoFamily)
+                            Text(codes.joinToString(" ") { "0x$it" },
+                                color = TextMid, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                fontFamily = GeistMonoFamily)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    f, color = if (active) OnBrava else TextMid,
-                    fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(percent = 50))
-                        .background(if (active) Brava else Surf1)
-                        .clickable { filter = f }
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    "Press ONE direction, note its code, repeat. Tell me which code = which direction.",
+                    color = TextLo, fontSize = 11.5.sp, lineHeight = 15.sp,
                 )
             }
-        }
 
-        Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
+            Text("Telemetry fields", color = TextHi, fontSize = 15.sp,
+                fontWeight = FontWeight.Bold, fontFamily = GeistFamily,
+                modifier = Modifier.padding(start = 2.dp, bottom = 8.dp))
 
-        if (shown.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    if (packets.isEmpty()) "No packets captured yet" else "Nothing matches this filter",
-                    color = TextLo, fontSize = 13.sp,
-                )
+            val rows = remember(fields) {
+                fields.values.sortedBy { it.key }
+            }
+            if (rows.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (recording) "Waiting for telemetry…" else "Tap Record while connected.",
+                        color = TextLo, fontSize = 13.sp,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    items(rows, key = { it.key }) { fld -> FieldRow(fld) }
+                }
             }
         } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                items(shown) { p -> PacketRow(p) }
+            // ── Raw log mode: filter chips + packet list ──
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                filters.forEach { f ->
+                    val active = f == filter
+                    Text(
+                        f, color = if (active) OnBrava else TextMid,
+                        fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(if (active) Brava else Surf1)
+                            .clickable { filter = f }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                }
             }
+
+            Spacer(Modifier.height(12.dp))
+
+            if (shown.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (packets.isEmpty()) "No packets captured yet" else "Nothing matches this filter",
+                        color = TextLo, fontSize = 13.sp,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    items(shown) { p -> PacketRow(p) }
+                }
+            }
+        }
+    }
+}
+
+/** One telemetry field in the live monitor: key, hex, decimal, and a change counter. */
+@Composable
+private fun FieldRow(f: DiscoveryLog.FieldState) {
+    val active = (System.currentTimeMillis() - f.lastMs) < 1500 && f.changes > 0
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (active) BravaTint else Surf1)
+            .padding(horizontal = 14.dp, vertical = 11.dp),
+    ) {
+        Text("0C/${f.key.substringAfter('/')}", color = TextMid, fontSize = 12.sp,
+            fontFamily = GeistMonoFamily, modifier = Modifier.width(56.dp))
+        Text("0x${f.hex}", color = TextHi, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+            fontFamily = GeistMonoFamily, modifier = Modifier.width(90.dp))
+        Text("${f.decimal}", color = BravaBright, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            fontFamily = GeistMonoFamily, modifier = Modifier.weight(1f))
+        if (f.changes > 0) {
+            Text("Δ${f.changes}", color = if (active) BravaBright else TextLo, fontSize = 11.sp,
+                fontFamily = GeistMonoFamily)
         }
     }
 }

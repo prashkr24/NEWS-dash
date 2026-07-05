@@ -47,8 +47,8 @@ android {
         // 1.3.1 = hotfix for the MapLibre page-switch SIGSEGV that shipped in 1.3.0 (code 12).
         // NEWS-dash fork starts its own version line. Alpha until the joystick +
         // card-UI roadmap lands. Bump versionCode by 1 on every build you install.
-        versionCode = 14
-        versionName = "0.9.0-rc1"
+        versionCode = 15
+        versionName = "0.9.1-rc1"
 
         // Test-channel telemetry: ride/connection diagnostics upload to Firestore so logs can be
         // pulled remotely (no adb) while iterating on test builds. MUST be flipped to "false" for
