@@ -144,7 +144,8 @@ class RouteViewModel(app: Application) : AndroidViewModel(app) {
 
         _state.value = _state.value.copy(routing = true)
         viewModelScope.launch {
-            val alts = Router.routes(
+            val alts = com.example.northstar.dash.nav.RoutingHub.routes(
+                getApplication(),
                 GeoPoint(origin.latitude, origin.longitude),
                 GeoPoint(destLat, destLng),
             )

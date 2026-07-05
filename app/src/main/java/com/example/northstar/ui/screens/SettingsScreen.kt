@@ -185,6 +185,9 @@ fun SettingsScreen(
         SectionLabel("Dash map")
         MapProviderSection()
 
+        SectionLabel("Routing")
+        RoutingEngineSection()
+
         SectionLabel("Units")
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 14.dp) {
             NorthstarSegmented(listOf("Kilometres", "Miles"), units, { units = it }, Modifier.fillMaxWidth())

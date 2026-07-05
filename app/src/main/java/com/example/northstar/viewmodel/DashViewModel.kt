@@ -653,7 +653,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             // Prefer the alternative the rider picked on the Route screen, if it matches
             // this destination; otherwise fetch fresh.
             val r = com.example.northstar.dash.nav.RoutePlanHolder.takeIfMatches(destLatV, destLngV)
-                ?: Router.route(GeoPoint(loc.latitude, loc.longitude), GeoPoint(destLatV, destLngV))
+                ?: com.example.northstar.dash.nav.RoutingHub.route(
+                    getApplication(), GeoPoint(loc.latitude, loc.longitude), GeoPoint(destLatV, destLngV))
             if (r != null) {
                 route = r
                 tiles.prefetchRoute(r.geometry)
@@ -1111,7 +1112,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         com.example.northstar.data.RideDiagnostics.log("reroute", "off-route ${offSec}s → requesting new route")
         val startMs = System.currentTimeMillis()
         viewModelScope.launch {
-            val r = Router.route(GeoPoint(loc.latitude, loc.longitude), GeoPoint(dLat, dLng))
+            val r = com.example.northstar.dash.nav.RoutingHub.route(
+                getApplication(), GeoPoint(loc.latitude, loc.longitude), GeoPoint(dLat, dLng))
             val took = System.currentTimeMillis() - startMs
             if (r != null) {
                 route = r
