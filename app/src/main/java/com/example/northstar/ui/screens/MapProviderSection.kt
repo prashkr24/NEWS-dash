@@ -74,6 +74,8 @@ fun MapProviderSection(onSourceChanged: (TileSource) -> Unit = {}) {
                             TileSource.MAPPLS -> if (mapplsKey.isBlank())
                                 "Indian road data · Beta · tap to add REST key"
                             else "Indian road data · Beta · daily free limit applies"
+                            TileSource.MAPLIBRE_3D ->
+                                "Raised 3D buildings · Experimental · OSM data, no key"
                         },
                         color = TextLo, fontSize = 11.5.sp, modifier = Modifier.padding(top = 2.dp),
                     )

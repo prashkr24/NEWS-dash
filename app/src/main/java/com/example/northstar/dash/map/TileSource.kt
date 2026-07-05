@@ -70,6 +70,21 @@ enum class TileSource(
                 apiKey ?: "", lat, lng, z,
             )
         }
+    },
+
+    MAPLIBRE_3D(
+        id = "maplibre3d",
+        displayName = "MapLibre 3D · Beta",
+        attribution = "© OpenMapTiles © OpenStreetMap",
+        cacheNamespace = "tiles_gmaps_v1", // unused: this source is rendered by Building3DRenderer,
+        requiresApiKey = false,             // not the raster TileProvider. Namespace kept valid as a safety net.
+        maxZoom = 20,
+    ) {
+        // Rendered via MapLibre vector snapshot (Building3DRenderer), NOT raster tiles.
+        // If the 3D path ever yields no snapshot, redrawFrame falls back to flat tiles,
+        // and these keyless Google URLs are what that fallback fetches.
+        override fun url(z: Int, x: Int, y: Int, apiKey: String?): String =
+            "https://mt1.google.com/vt/lyrs=m&hl=en&z=$z&x=$x&y=$y"
     };
 
     /** Build the fetch URL for one tile. [apiKey] is ignored by keyless sources. */

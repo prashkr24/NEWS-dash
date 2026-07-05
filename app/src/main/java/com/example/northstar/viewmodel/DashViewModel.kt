@@ -88,6 +88,14 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     private val tiles       = TileProvider(app, viewModelScope)
     private val location    = LocationTracker(app)
     private val mapRenderer = MapRenderer(tiles)
+    // EXPERIMENTAL: off-screen MapLibre 3D-buildings renderer, created on first use of the
+    // MapLibre 3D dash-map source. Null until then; destroyed in teardown.
+    @Volatile private var building3d: com.example.northstar.dash.map.Building3DRenderer? = null
+    private fun ensure3dRenderer(w: Int, h: Int) {
+        if (building3d == null) {
+            building3d = com.example.northstar.dash.map.Building3DRenderer(getApplication(), w, h)
+        }
+    }
     private val mediaInfo   = com.example.northstar.media.MediaInfoProvider(app)
     private val callController = com.example.northstar.media.CallController(app)
     private var mediaObserveJob: Job? = null
@@ -1186,7 +1194,24 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             gpsLost = gpsStatus == GpsStatus.LOST,
         )
         val canvas = Canvas(bmp)
-        mapRenderer.draw(canvas, frame)
+        // EXPERIMENTAL MapLibre 3D base layer. Only when the rider selected it AND a snapshot
+        // is ready; otherwise fall through to the flat tile compositor. This guarantees the
+        // stream never breaks because of the 3D path.
+        val use3d = com.example.northstar.data.MapPrefs.tileSource(getApplication()) ==
+            com.example.northstar.dash.map.TileSource.MAPLIBRE_3D
+        var drew3d = false
+        if (use3d) {
+            ensure3dRenderer(bmp.width, bmp.height)
+            building3d?.requestFor(centerLat, centerLng, zoom, if (headingUp) heading else 0f, route?.geometry ?: emptyList())
+            building3d?.latestBitmap?.let { snap ->
+                canvas.drawBitmap(snap, null, android.graphics.RectF(0f, 0f, bmp.width.toFloat(), bmp.height.toFloat()), null)
+                // Route + rider + ETA + attribution still drawn on top by MapRenderer's overlay
+                // pass; call draw() with a flag so it skips its own tile fill.
+                mapRenderer.draw(canvas, frame, skipBaseMap = true)
+                drew3d = true
+            }
+        }
+        if (!drew3d) mapRenderer.draw(canvas, frame)
         // The dash shows ONLY our video frame while projecting — it won't overlay its native
         // now-playing/call cards (confirmed: 05 0d/05 22 are sent fine but never displayed mid-map).
         // So we draw them INTO the frame ourselves, as the CLAUDE.md design always intended.
@@ -1320,6 +1345,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         stopMediaForwarding()
         encoder?.release(); encoder = null
         frameBitmap?.recycle(); frameBitmap = null
+        building3d?.destroy(); building3d = null
         _previewFrame.value = null   // drop the stale dash frame so the preview falls back to the live map
     }
 
