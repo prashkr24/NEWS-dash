@@ -46,7 +46,11 @@ class MainActivity : ComponentActivity() {
             }.start()
         }
 
-        handleIntent(intent)
+        // Only process the launch intent on a genuinely fresh launch. On recreation
+        // (rotation, theme change, relaunch from recents) Android re-delivers the
+        // ORIGINAL share intent — without this guard we'd re-trigger destination
+        // resolution and a duplicate routing API call for the same share.
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
             NorthstarTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Bg1) {
