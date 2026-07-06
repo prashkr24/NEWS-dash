@@ -34,6 +34,8 @@ import java.io.File
 @Composable
 fun DiscoveryScreen() {
     val context = LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(Unit) { DiscoveryLog.attach(context) }
+    val sessionInfo by DiscoveryLog.sessionInfo.collectAsState()
     val packets by DiscoveryLog.packets.collectAsState()
     val recording by DiscoveryLog.recording.collectAsState()
     val fields by DiscoveryLog.fields.collectAsState()
@@ -86,6 +88,15 @@ fun DiscoveryScreen() {
                 "Export", onClick = { exportCapture(context) },
                 icon = NorthstarIcons.Share, variant = BtnVariant.Secondary, size = BtnSize.Sm,
                 modifier = Modifier.weight(1f),
+            )
+        }
+
+        sessionInfo?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it, color = if (recording) BravaBright else TextMid, fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold, fontFamily = GeistMonoFamily,
+                modifier = Modifier.padding(start = 4.dp),
             )
         }
 
@@ -260,9 +271,16 @@ private fun PacketRow(p: DiscoveryLog.Packet) {
 
 private fun exportCapture(context: android.content.Context) {
     runCatching {
-        val dir = File(context.cacheDir, "captures").apply { mkdirs() }
-        val file = File(dir, "waydash-capture-${System.currentTimeMillis()}.txt")
-        file.writeText(DiscoveryLog.exportText())
+        // Prefer the complete on-disk session (nothing lost); fall back to the live buffer.
+        val sessionFile = DiscoveryLog.sessionFilePath()
+        val file = if (sessionFile != null && sessionFile.exists()) {
+            sessionFile
+        } else {
+            val dir = File(context.cacheDir, "captures").apply { mkdirs() }
+            File(dir, "waydash-capture-${System.currentTimeMillis()}.txt").apply {
+                writeText(DiscoveryLog.exportText())
+            }
+        }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val share = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"

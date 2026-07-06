@@ -36,7 +36,19 @@ object DiscoveryLog {
                 rawHex.trim().takeLast(2).uppercase() else null
     }
 
-    private const val MAX = 500  // ring-buffer cap; oldest dropped past this
+    private const val MAX = 500  // in-memory ring buffer for the live UI; full session goes to file
+
+    // ── Full-session file sink ──────────────────────────────────────────────
+    // The 500-packet ring buffer above is only for the live list; on a real ride it
+    // overflows in ~30s. To never lose data, every packet is ALSO appended to a session
+    // file the moment it arrives. That file is what the rider exports — the complete
+    // capture, however long the ride.
+    @Volatile private var sessionWriter: java.io.Writer? = null
+    @Volatile private var sessionFile: java.io.File? = null
+    @Volatile private var sessionCount: Int = 0
+    private val _sessionInfo = MutableStateFlow<String?>(null)
+    /** Human status of the on-disk session (e.g. "1,240 packets saved"), or null if none. */
+    val sessionInfo: StateFlow<String?> = _sessionInfo
 
     private val _packets = MutableStateFlow<List<Packet>>(emptyList())
     val packets: StateFlow<List<Packet>> = _packets
@@ -62,8 +74,42 @@ object DiscoveryLog {
     private val _lastButtonMs = MutableStateFlow(0L)
     val lastButtonMs: StateFlow<Long> = _lastButtonMs
 
-    fun setRecording(on: Boolean) { _recording.value = on }
-    fun toggleRecording() { _recording.value = !_recording.value }
+    /** Must be called once (from the screen) so the file sink knows where to write. */
+    @Volatile private var appContext: android.content.Context? = null
+    fun attach(context: android.content.Context) { appContext = context.applicationContext }
+
+    fun setRecording(on: Boolean) {
+        if (on == _recording.value) return
+        if (on) openSession() else closeSession()
+        _recording.value = on
+    }
+    fun toggleRecording() = setRecording(!_recording.value)
+
+    private fun openSession() {
+        val ctx = appContext ?: return
+        runCatching {
+            val dir = java.io.File(ctx.cacheDir, "captures").apply { mkdirs() }
+            val f = java.io.File(dir, "waydash-session-${System.currentTimeMillis()}.txt")
+            val w = f.bufferedWriter()
+            w.appendLine("WayDash full-session capture")
+            w.appendLine("Started: ${TIME_FMT.format(Date())}")
+            w.appendLine("---- time  kind  type/sub  size  raw  (decoded) ----")
+            w.flush()
+            sessionFile = f; sessionWriter = w; sessionCount = 0
+            _sessionInfo.value = "Recording to file…"
+        }
+    }
+
+    private fun closeSession() {
+        runCatching {
+            sessionWriter?.flush(); sessionWriter?.close()
+        }
+        sessionWriter = null
+        _sessionInfo.value = sessionFile?.let { "%,d packets saved this session".format(sessionCount) }
+    }
+
+    /** The on-disk full-session file (for export), or null if none yet. */
+    fun sessionFilePath(): java.io.File? = sessionFile
 
     fun clear() {
         _packets.value = emptyList()
@@ -79,6 +125,23 @@ object DiscoveryLog {
         if (!_recording.value) return
         val now = System.currentTimeMillis()
         val p = Packet(now, kind, type, sub, sizeBytes, rawHex, decodedHex)
+
+        // Full-session file sink — write EVERY packet, so long rides lose nothing.
+        sessionWriter?.let { w ->
+            runCatching {
+                w.append(p.clock).append("  ").append(kind.name).append("  ")
+                w.append("0x%02X/0x%02X  ".format(type, sub))
+                w.append("${sizeBytes}B  ").append(rawHex)
+                decodedHex?.let { w.append("  dec=").append(it) }
+                w.append('\n')
+                sessionCount++
+                if (sessionCount % 50 == 0) {
+                    w.flush()
+                    _sessionInfo.value = "%,d packets saved this session".format(sessionCount)
+                }
+            }
+        }
+
         val cur = _packets.value
         _packets.value = (if (cur.size >= MAX) cur.drop(cur.size - MAX + 1) else cur) + p
 
