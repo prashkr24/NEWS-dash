@@ -15,6 +15,20 @@ import android.util.Log
  */
 class NorthstarNotificationListener : NotificationListenerService() {
 
+    private companion object {
+        const val TAG = "NsNotifListener"
+        // Common Indian-market messaging apps whose notifications become dash alerts.
+        // Category-based detection covers the rest.
+        val MESSAGING_PACKAGES = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "org.telegram.messenger",
+            "com.google.android.apps.messaging",
+            "org.thoughtcrime.securesms",   // Signal
+            "com.instagram.android",
+        )
+    }
+
     // These two confirm in the PERSISTENT diagnostics whether the listener is actually bound — the
     // crux of the "reinstall unbinds the listener" bug. If 'listener connected' never appears in a
     // remote pull, the service is dead (toggle notification access off/on, or the requestRebind in
@@ -29,7 +43,10 @@ class NorthstarNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val n = sbn?.notification ?: return
-        if (n.category != Notification.CATEGORY_CALL) return
+        if (n.category != Notification.CATEGORY_CALL) {
+            maybePostMessageAlert(sbn, n)
+            return
+        }
         // CallStyle's EXTRA_CALL_TYPE (API 31+): 1=INCOMING, 2=ONGOING, 3=OUTGOING, 4=SCREENING.
         // INCOMING → ringing (overlay + answer/reject). ONGOING/OUTGOING → active (end only, no
         // overlay). Pre-31 we can't tell, so assume incoming.
@@ -51,6 +68,33 @@ class NorthstarNotificationListener : NotificationListenerService() {
      * buttons — firing these is the reliable way to control the call. Match by button title; for a
      * 2-button incoming call with no title match, fall back to [decline, answer] order.
      */
+    /**
+     * Messaging notifications → dash alert card (opt-in via AlertPrefs). Trusts either
+     * the msg category or a known messaging package; skips group summaries and silent
+     * re-posts. Only sender + a short snippet ever reach the dash.
+     */
+    private fun maybePostMessageAlert(sbn: StatusBarNotification, n: Notification) {
+        if (!com.example.northstar.data.AlertPrefs.messagesOnDash(applicationContext)) return
+        val isMsgCategory = n.category == Notification.CATEGORY_MESSAGE ||
+            n.category == Notification.CATEGORY_EMAIL
+        val isMsgApp = sbn.packageName in MESSAGING_PACKAGES
+        if (!isMsgCategory && !isMsgApp) return
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+
+        val title = n.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val text = n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        if (title.isBlank() && text.isBlank()) return
+        com.example.northstar.dash.DashAlertBus.post(
+            title.ifBlank { appLabel(sbn.packageName) },
+            text,
+        )
+        Log.d(TAG, "message alert: $title")
+    }
+
+    private fun appLabel(pkg: String): String = runCatching {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    }.getOrDefault("Message")
+
     private fun extractActions(n: Notification, incoming: Boolean): Pair<android.app.PendingIntent?, android.app.PendingIntent?> {
         var answer: android.app.PendingIntent? = null
         var decline: android.app.PendingIntent? = null
@@ -83,5 +127,4 @@ class NorthstarNotificationListener : NotificationListenerService() {
         return e.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
     }
 
-    companion object { private const val TAG = "NsNotifListener" }
 }

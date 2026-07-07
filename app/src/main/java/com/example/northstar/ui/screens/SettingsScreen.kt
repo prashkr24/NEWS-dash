@@ -164,10 +164,24 @@ fun SettingsScreen(
                         if (callAnswerGranted) ChipTone.Gold else ChipTone.Off, dot = true,
                     )
                 },
-                last = true,
                 onClick = if (callAnswerGranted) null else {
                     { callPermLauncher.launch(android.Manifest.permission.ANSWER_PHONE_CALLS) }
                 },
+            )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            var msgAlerts by remember { mutableStateOf(com.example.northstar.data.AlertPrefs.messagesOnDash(ctx)) }
+            SettingRow(
+                NorthstarIcons.Bell,
+                "Message alerts on dash",
+                if (mediaGranted) "Sender + snippet as a card on the dash for 8s"
+                else "Needs notification access (enable above)",
+                control = {
+                    NorthstarToggle(msgAlerts && mediaGranted) { on ->
+                        msgAlerts = on
+                        com.example.northstar.data.AlertPrefs.setMessagesOnDash(ctx, on)
+                    }
+                },
+                last = true,
             )
         }
 

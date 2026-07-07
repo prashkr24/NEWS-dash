@@ -91,14 +91,14 @@ object TomTomRouter {
                 val refs = ins.optJSONArray("roadNumbers")
                 if (refs != null && refs.length() > 0) roadNames.add(refs.getString(0))
                 else if (street.isNotBlank()) roadNames.add(street)
-                val flyover = street.contains("flyover", ignoreCase = true) ||
-                        ins.optString("message").contains("flyover", ignoreCase = true)
+                val elevatedHint = FlyoverDetector.hint(street, ins.optString("message"))
+                val flyover = elevatedHint != null
                 val type = mapManeuver(ins.optString("maneuver"))
                 maneuvers.add(
                     Maneuver(
                         type = type,
-                        instruction = if (flyover) "Take the flyover"
-                        else ins.optString("message").ifBlank { type.name.lowercase().replace('_', ' ') },
+                        instruction = elevatedHint
+                            ?: ins.optString("message").ifBlank { type.name.lowercase().replace('_', ' ') },
                         location = GeoPoint(pt.getDouble("latitude"), pt.getDouble("longitude")),
                         cumulativeMeters = ins.optDouble("routeOffsetInMeters", 0.0),
                         flyover = flyover,

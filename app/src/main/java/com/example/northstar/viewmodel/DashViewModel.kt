@@ -1174,7 +1174,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             // only when close (<= 400 m). Normal turns stay off the map (native bubble
             // handles those) to keep the frame clean.
             maneuverText = lastNextManeuver?.takeIf { it.flyover && lastNextTurnM <= 400.0 }
-                ?.let { "Take the flyover · ${fmtDist(lastNextTurnM)}" },
+                ?.let { "${it.instruction} · ${fmtDist(lastNextTurnM)}" },
+            alertTitle = com.example.northstar.dash.DashAlertBus.active()?.title,
+            alertLine = com.example.northstar.dash.DashAlertBus.active()?.line,
             remainingText = remainingM?.let { fmtDist(it) },
             // Top-down (heading-up) nav view. The 3D perspective tilt is DISABLED: warping
             // flat raster tiles via setPolyToPoly stretches the baked-in map labels and

@@ -36,6 +36,8 @@ class MapRenderer(private val tiles: TileProvider) {
         val destName: String? = null,
         val route: List<GeoPoint> = emptyList(),
         val maneuverText: String? = null,  // e.g. "Turn left · 400 m"
+        val alertTitle: String? = null,    // e.g. "Prashant (WhatsApp)"
+        val alertLine: String? = null,     // e.g. "reaching in 10 min"
         val remainingText: String? = null, // e.g. "186 km"
         val tilt3d: Boolean = false,       // perspective 3D view (nav heading-up only)
         val etaPrimary: String? = null,    // big glance value, e.g. "24 min" (nav only)
@@ -78,6 +80,17 @@ class MapRenderer(private val tiles: TileProvider) {
     // Flyover/maneuver hint chip — amber guidance pill (Google-tooltip-like).
     private val flyoverBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(244, 183, 64) }
     private val flyoverText    = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 14f; isFakeBoldText = true; textAlign = Paint.Align.CENTER }
+    // Message-alert card (sender + snippet) — dark card, Brava edge, readable at a glance.
+    private val alertBgPaint     = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(235, 16, 26, 40) }
+    private val alertBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 2f; color = Color.rgb(46, 124, 246)
+    }
+    private val alertTitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 14f; isFakeBoldText = true; color = Color.rgb(239, 243, 250); textAlign = Paint.Align.CENTER
+    }
+    private val alertLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 12.5f; color = Color.rgb(147, 163, 188); textAlign = Paint.Align.CENTER
+    }
     // Provider attribution (bottom-right). Required visible by Mappls' T&C; drawn for both
     // sources. White with a dark shadow so it reads on any map colour without a pill.
     private val attributionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -263,6 +276,32 @@ class MapRenderer(private val tiles: TileProvider) {
             val r = (bottom - top) / 2f
             canvas.drawRoundRect(pillRect, r, r, flyoverBgPaint)
             canvas.drawText(label, cxp, top + padV - fm.ascent, flyoverText)
+        }
+
+        // ── Message-alert card (sender + snippet) — stacks below the GPS/flyover pills
+        // so nothing overlaps; expires via DashAlertBus so the map is never obscured
+        // for long. Visual-first: the rider has no headset, this card IS the alert. ──
+        f.alertTitle?.let { title ->
+            val line = f.alertLine.orEmpty()
+            var top = 16f
+            if (f.gpsLost || f.gpsWeak) top += 36f
+            if (f.maneuverText != null) top += 36f
+            val tfm = alertTitlePaint.fontMetrics
+            val lfm = alertLinePaint.fontMetrics
+            val titleH = tfm.descent - tfm.ascent
+            val lineH = if (line.isNotBlank()) lfm.descent - lfm.ascent else 0f
+            val padH = 18f; val padV = 9f; val gap = if (line.isNotBlank()) 3f else 0f
+            val cardW = maxOf(alertTitlePaint.measureText(title), alertLinePaint.measureText(line))
+                .coerceAtMost(w * 0.82f) + padH * 2
+            val cardH = padV * 2 + titleH + gap + lineH
+            val cxp = w / 2f
+            pillRect.set(cxp - cardW / 2f, top, cxp + cardW / 2f, top + cardH)
+            canvas.drawRoundRect(pillRect, 14f, 14f, alertBgPaint)
+            canvas.drawRoundRect(pillRect, 14f, 14f, alertBorderPaint)
+            canvas.drawText(title, cxp, top + padV - tfm.ascent, alertTitlePaint)
+            if (line.isNotBlank()) {
+                canvas.drawText(line, cxp, top + padV + titleH + gap - lfm.ascent, alertLinePaint)
+            }
         }
 
         // No other on-map text overlays — the dash's own widgets show name/turn, and the
