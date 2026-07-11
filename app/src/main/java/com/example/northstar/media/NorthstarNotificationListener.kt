@@ -55,6 +55,7 @@ class NorthstarNotificationListener : NotificationListenerService() {
         val active = type == 2 || type == 3
         if (!incoming && !active) { CallInfoProvider.update(null); return }   // screening / unknown
 
+        lastCallKey = sbn.key
         val (answer, decline) = extractActions(n, incoming)
         val caller = callerName(n).ifBlank { if (incoming) "Call" else "On call" }
         com.example.northstar.data.RideDiagnostics.log("media",
@@ -114,10 +115,15 @@ class NorthstarNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
-        if (sbn?.notification?.category == Notification.CATEGORY_CALL) {
+        // Android sometimes strips the category on removal, which left the dash call
+        // card stuck after hang-up. Match by the notification KEY we saw at post time
+        // (works regardless of category), with the category check kept as a fallback.
+        if (sbn?.key == lastCallKey || sbn?.notification?.category == Notification.CATEGORY_CALL) {
+            lastCallKey = null
             CallInfoProvider.update(null)
         }
     }
+    @Volatile private var lastCallKey: String? = null
 
     /** Caller name = the call notification's title; fall back to its text. */
     private fun callerName(n: Notification): String {

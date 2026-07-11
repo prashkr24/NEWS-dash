@@ -44,7 +44,7 @@ fun MapProviderQuickToggle(modifier: Modifier = Modifier) {
                 .padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            TileSource.entries.forEach { src ->
+            TileSource.entries.filter { it != TileSource.MAPPLS }.forEach { src ->
                 val active = src == selected
                 Text(
                     text = src.displayName,

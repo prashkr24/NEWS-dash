@@ -38,6 +38,7 @@ class MapRenderer(private val tiles: TileProvider) {
         val maneuverText: String? = null,  // e.g. "Turn left · 400 m"
         val alertTitle: String? = null,    // e.g. "Prashant (WhatsApp)"
         val alertLine: String? = null,     // e.g. "reaching in 10 min"
+        val alertBadge: Int = 0,           // unread count for the corner bubble (0 = hide)
         val remainingText: String? = null, // e.g. "186 km"
         val tilt3d: Boolean = false,       // perspective 3D view (nav heading-up only)
         val etaPrimary: String? = null,    // big glance value, e.g. "24 min" (nav only)
@@ -90,6 +91,13 @@ class MapRenderer(private val tiles: TileProvider) {
     }
     private val alertLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = 12.5f; color = Color.rgb(147, 163, 188); textAlign = Paint.Align.CENTER
+    }
+    private val alertAvatarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(46, 124, 246) }
+    private val alertAvatarText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 16f; isFakeBoldText = true; color = Color.WHITE; textAlign = Paint.Align.CENTER
+    }
+    private val alertBadgeText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 11f; isFakeBoldText = true; color = Color.WHITE; textAlign = Paint.Align.CENTER
     }
     // Provider attribution (bottom-right). Required visible by Mappls' T&C; drawn for both
     // sources. White with a dark shadow so it reads on any map colour without a pill.
@@ -295,26 +303,56 @@ class MapRenderer(private val tiles: TileProvider) {
         // so nothing overlaps; expires via DashAlertBus so the map is never obscured
         // for long. Visual-first: the rider has no headset, this card IS the alert. ──
         f.alertTitle?.let { title ->
+            // Messenger-style bubble: round avatar (sender initial) + speech bubble beside it,
+            // stacked below whatever pills are showing. Left-anchored like a chat head.
             val line = f.alertLine.orEmpty()
             var top = 16f
             if (f.gpsLost || f.gpsWeak) top += 36f
             if (f.maneuverText != null) top += 36f
+            val avR = 17f                                    // avatar radius
+            val avCx = w * 0.5f - 8f - minOf(
+                maxOf(alertTitlePaint.measureText(title), alertLinePaint.measureText(line))
+                    .coerceAtMost(w * 0.62f) + 30f, w * 0.66f
+            ) / 2f
+            val avCy = top + avR + 4f
+            // avatar
+            canvas.drawCircle(avCx, avCy, avR, alertAvatarPaint)
+            val initial = title.trim().take(1).uppercase().ifBlank { "•" }
+            val afm = alertAvatarText.fontMetrics
+            canvas.drawText(initial, avCx, avCy - (afm.ascent + afm.descent) / 2f, alertAvatarText)
+            // bubble
             val tfm = alertTitlePaint.fontMetrics
             val lfm = alertLinePaint.fontMetrics
             val titleH = tfm.descent - tfm.ascent
             val lineH = if (line.isNotBlank()) lfm.descent - lfm.ascent else 0f
-            val padH = 18f; val padV = 9f; val gap = if (line.isNotBlank()) 3f else 0f
-            val cardW = maxOf(alertTitlePaint.measureText(title), alertLinePaint.measureText(line))
-                .coerceAtMost(w * 0.82f) + padH * 2
-            val cardH = padV * 2 + titleH + gap + lineH
-            val cxp = w / 2f
-            pillRect.set(cxp - cardW / 2f, top, cxp + cardW / 2f, top + cardH)
-            canvas.drawRoundRect(pillRect, 14f, 14f, alertBgPaint)
-            canvas.drawRoundRect(pillRect, 14f, 14f, alertBorderPaint)
-            canvas.drawText(title, cxp, top + padV - tfm.ascent, alertTitlePaint)
+            val padH = 12f; val padV = 8f; val gap = if (line.isNotBlank()) 3f else 0f
+            val textW = maxOf(alertTitlePaint.measureText(title), alertLinePaint.measureText(line))
+                .coerceAtMost(w * 0.62f)
+            val bubL = avCx + avR + 7f
+            val bubT = top
+            val bubR = bubL + textW + padH * 2
+            val bubB = bubT + padV * 2 + titleH + gap + lineH
+            pillRect.set(bubL, bubT, bubR, bubB)
+            canvas.drawRoundRect(pillRect, 16f, 16f, alertBgPaint)
+            canvas.drawRoundRect(pillRect, 16f, 16f, alertBorderPaint)
+            alertTitlePaint.textAlign = Paint.Align.LEFT
+            alertLinePaint.textAlign = Paint.Align.LEFT
+            canvas.drawText(title, bubL + padH, bubT + padV - tfm.ascent, alertTitlePaint)
             if (line.isNotBlank()) {
-                canvas.drawText(line, cxp, top + padV + titleH + gap - lfm.ascent, alertLinePaint)
+                canvas.drawText(line, bubL + padH, bubT + padV + titleH + gap - lfm.ascent, alertLinePaint)
             }
+        }
+
+        // ── Corner unread bubble: small badge at the top-right of the dome whenever
+        // messages arrived recently (last 10 min) — visible even after the big bubble
+        // expires, so a glance tells the rider "something came in". ──
+        if (f.alertBadge > 0) {
+            val bx = w - 26f; val by = 26f
+            canvas.drawCircle(bx, by, 12f, alertAvatarPaint)
+            canvas.drawCircle(bx, by, 12f, alertBorderPaint)
+            val bfm = alertBadgeText.fontMetrics
+            val label = if (f.alertBadge > 9) "9+" else f.alertBadge.toString()
+            canvas.drawText(label, bx, by - (bfm.ascent + bfm.descent) / 2f, alertBadgeText)
         }
 
         // No other on-map text overlays — the dash's own widgets show name/turn, and the

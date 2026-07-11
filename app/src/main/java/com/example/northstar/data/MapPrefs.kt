@@ -21,6 +21,7 @@ object MapPrefs {
 
     fun tileSource(context: Context): TileSource =
         TileSource.fromId(prefs(context).getString(KEY_TILE_SOURCE, null))
+            .let { if (it == TileSource.MAPPLS) TileSource.GOOGLE else it }  // Mappls retired from UI
 
     fun setTileSource(context: Context, source: TileSource) {
         prefs(context).edit().putString(KEY_TILE_SOURCE, source.id).apply()

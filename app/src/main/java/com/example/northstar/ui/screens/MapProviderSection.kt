@@ -45,7 +45,7 @@ fun MapProviderSection(onSourceChanged: (TileSource) -> Unit = {}) {
             .border(1.dp, Line, RoundedCornerShape(14.dp))
             .padding(12.dp)
     ) {
-        TileSource.entries.forEach { src ->
+        TileSource.entries.filter { it != TileSource.MAPPLS }.forEach { src ->
             val active = src == selected
             Row(
                 verticalAlignment = Alignment.CenterVertically,

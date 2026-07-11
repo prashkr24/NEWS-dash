@@ -1164,6 +1164,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val etaSecondary = if (etaPrimary != null && !arriving && !recalculating)
             java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(etaArrivalMs))
         else null
+        val dashAlert = com.example.northstar.dash.DashAlertBus.active()
         val frame = MapRenderer.Frame(
             centerLat = centerLat,
             centerLng = centerLng,
@@ -1183,8 +1184,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             // handles those) to keep the frame clean.
             maneuverText = lastNextManeuver?.takeIf { it.flyover && lastNextTurnM <= 400.0 }
                 ?.let { "${it.instruction} · ${fmtDist(lastNextTurnM)}" },
-            alertTitle = com.example.northstar.dash.DashAlertBus.active()?.title,
-            alertLine = com.example.northstar.dash.DashAlertBus.active()?.line,
+            alertTitle = dashAlert?.title,
+            alertLine = dashAlert?.line,
+            alertBadge = com.example.northstar.dash.DashAlertBus.badgeCount(),
             remainingText = remainingM?.let { fmtDist(it) },
             // Top-down (heading-up) nav view. The 3D perspective tilt is DISABLED: warping
             // flat raster tiles via setPolyToPoly stretches the baked-in map labels and
@@ -1224,6 +1226,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     // Overlay paints — created once (never per-frame). ~50% smaller than the first cut, per feedback.
     private val ovBg by lazy { android.graphics.Paint().apply { color = 0xCC0B0D0E.toInt(); isAntiAlias = true } }
+    private val ovRing by lazy { android.graphics.Paint().apply {
+        color = 0xFF2E7CF6.toInt(); isAntiAlias = true
+        style = android.graphics.Paint.Style.STROKE; strokeWidth = 3f
+    } }
     private val ovTitle by lazy { android.graphics.Paint().apply {
         color = android.graphics.Color.WHITE; isAntiAlias = true; textSize = 15f
         typeface = android.graphics.Typeface.DEFAULT_BOLD; textAlign = android.graphics.Paint.Align.CENTER } }
@@ -1240,14 +1246,26 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun drawDashOverlays(canvas: Canvas, w: Int, h: Int) {
         val call = com.example.northstar.media.CallInfoProvider.incomingCall.value
-        if (call == null || !call.incoming) return   // overlay only for a ringing call, not active/outgoing
-        val cx = w / 2f; val cy = h / 2f
-        val half = h * 0.28f   // ~half the previous width; stays inside the round display
-        canvas.drawRoundRect(cx - half, cy - 26f, cx + half, cy + 26f, 10f, 10f, ovBg)
-        canvas.drawText("Incoming call", cx, cy - 11f, ovSub)
-        canvas.drawText(ellipsizeOverlay(call.caller, 16), cx, cy + 5f, ovTitle)
-        canvas.drawText("UP answer · DOWN reject", cx, cy + 19f, ovAccent)
+        if (call == null || !call.incoming) { callOverlaySinceMs = 0L; return }
+        // Failsafe TTL: if the dialer's notification-removed event never reaches us
+        // (Android drops it sometimes — "call card stays after disconnect"), stop
+        // drawing after 60s of continuous ringing. Real rings rarely exceed ~30s.
+        val now = System.currentTimeMillis()
+        if (callOverlaySinceMs == 0L) callOverlaySinceMs = now
+        if (now - callOverlaySinceMs > 60_000) return
+
+        // Rider feedback: the dash's native turn-circle (lower-left of the dome) is
+        // unused space during a call — draw the call bubble THERE instead of centre-
+        // screen, over/beside the circle region, leaving the road ahead visible.
+        val cx = w * 0.20f; val cy = h * 0.66f
+        val r = h * 0.195f
+        canvas.drawCircle(cx, cy, r, ovBg)
+        canvas.drawCircle(cx, cy, r, ovRing)
+        canvas.drawText("CALL", cx, cy - r * 0.32f, ovSub)
+        canvas.drawText(ellipsizeOverlay(call.caller, 10), cx, cy + 5f, ovTitle)
+        canvas.drawText("UP ✓ · DN ✕", cx, cy + r * 0.52f, ovAccent)
     }
+    @Volatile private var callOverlaySinceMs = 0L
 
     private fun ellipsizeOverlay(s: String, max: Int) = if (s.length > max) s.take(max - 1) + "…" else s
 
