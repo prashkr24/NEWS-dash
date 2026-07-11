@@ -110,10 +110,17 @@ class MapRenderer(private val tiles: TileProvider) {
     private val tiltSrc = FloatArray(8)
     private val tiltDst = FloatArray(8)
 
-    fun draw(canvas: Canvas, f: Frame) {
+    /**
+     * Renders a full dash frame. With [skipBaseMap] the caller has already drawn the base
+     * map (the experimental MapLibre 3D snapshot, heading + tilt baked in), so this pass
+     * skips the background, canvas rotation, tiles, and geo-anchored route/destination —
+     * drawing only a screen-anchored rider chevron and the screen-space HUD (ETA/GPS/
+     * flyover pills + attribution).
+     */
+    fun draw(canvas: Canvas, f: Frame, skipBaseMap: Boolean = false) {
         val w = canvas.width
         val h = canvas.height
-        canvas.drawColor(bgColor)
+        if (!skipBaseMap) canvas.drawColor(bgColor)
 
         val rotate = f.headingUp
         val tilt = rotate && f.tilt3d
@@ -131,7 +138,7 @@ class MapRenderer(private val tiles: TileProvider) {
         fun sx(lng: Double) = (Mercator.lngToTileX(lng, f.zoom) * ts - left).toFloat()
         fun sy(lat: Double) = (Mercator.latToTileY(lat, f.zoom) * ts - top).toFloat()
 
-        if (rotate) {
+        if (rotate && !skipBaseMap) {
             canvas.save()
             if (tilt) {
                 // Perspective tilt: warp the flat frame into a trapezoid that converges
@@ -154,6 +161,7 @@ class MapRenderer(private val tiles: TileProvider) {
         }
 
         // ── Tiles (padded when rotating so corners are covered) ──
+        if (!skipBaseMap) {
         val pad = if (rotate) (maxOf(w, h) * 0.45).toInt() else 0
         val txMin = Math.floorDiv((left - pad).toInt(), ts)
         val tyMin = Math.floorDiv((top - pad).toInt(), ts)
@@ -183,10 +191,14 @@ class MapRenderer(private val tiles: TileProvider) {
             dotPaint.color = googleRed; canvas.drawCircle(dx, dy, 9f, dotPaint)
             dotPaint.color = Color.WHITE; canvas.drawCircle(dx, dy, 3.5f, dotPaint)
         }
+        } // end !skipBaseMap (tiles + route + destination)
 
         // ── Rider marker — colour tracks GPS health (blue good, amber weak, grey lost) ──
         if (f.riderLat != null && f.riderLng != null) {
-            val rx = sx(f.riderLng); val ry = sy(f.riderLat)
+            // 3D mode: the snapshot camera targets the rider at image centre, heading-up
+            // baked in — anchor the marker there and skip the per-marker rotation.
+            val rx = if (skipBaseMap) w / 2f else sx(f.riderLng)
+            val ry = if (skipBaseMap) h / 2f else sy(f.riderLat)
             val markerColor = when {
                 f.gpsLost -> Color.rgb(150, 154, 160)  // grey: position is stale
                 f.gpsWeak -> Color.rgb(251, 188, 5)    // amber: imprecise
@@ -194,14 +206,15 @@ class MapRenderer(private val tiles: TileProvider) {
             }
             val haloColor = Color.argb(60, Color.red(markerColor), Color.green(markerColor), Color.blue(markerColor))
             dotPaint.color = haloColor; canvas.drawCircle(rx, ry, 17f, dotPaint)
-            if (rotate) {
+            if (rotate || skipBaseMap) {
                 // Heading-up: chevron pointing up (travel direction)
                 riderPath.reset()
                 riderPath.moveTo(rx, ry - 11f)
                 riderPath.lineTo(rx - 7f, ry + 7f)
                 riderPath.lineTo(rx + 7f, ry + 7f)
                 riderPath.close()
-                canvas.save(); canvas.rotate(f.heading, rx, ry)
+                canvas.save()
+                if (!skipBaseMap) canvas.rotate(f.heading, rx, ry)
                 dotPaint.color = Color.WHITE; canvas.drawCircle(rx, ry, 9f, dotPaint)
                 dotPaint.color = markerColor; canvas.drawPath(riderPath, dotPaint)
                 canvas.restore()
@@ -211,7 +224,7 @@ class MapRenderer(private val tiles: TileProvider) {
             }
         }
 
-        if (rotate) canvas.restore()
+        if (rotate && !skipBaseMap) canvas.restore()
 
         // ── ETA pill (screen-space so it stays upright; bottom-centre safe zone) ──
         // The dash is round, so it's kept narrow and centred. Shows ETA only (time +
