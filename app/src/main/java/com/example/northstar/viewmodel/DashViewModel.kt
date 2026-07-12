@@ -300,6 +300,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         wifiManager.onSsidResolved = { learned ->
             dashConfig.ssid = learned
             _ui.update { it.copy(ssid = learned) }
+            // If fast-reconnect (Option 2) is on, the suggestion needs the exact SSID —
+            // now that we've learned it, (re)register so Android can auto-join next time.
+            if (com.example.northstar.data.FastReconnectPrefs.enabled(getApplication())) {
+                com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+            }
         }
 
         viewModelScope.launch {

@@ -101,6 +101,31 @@ fun SettingsScreen(
             SettingRow(NorthstarIcons.Sync, "Auto-connect on start", "Keeps trying to link while open — no Connect tap",
                 control = { NorthstarToggle(autoConnect) { autoConnect = it; com.example.northstar.data.DashPrefs.setAutoConnect(ctx, it) } })
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            var fastReconnect by remember {
+                mutableStateOf(com.example.northstar.data.FastReconnectPrefs.enabled(ctx))
+            }
+            var fastStatus by remember {
+                mutableStateOf(
+                    if (com.example.northstar.dash.FastReconnectManager.supported) ""
+                    else "Needs Android 10+"
+                )
+            }
+            SettingRow(
+                NorthstarIcons.Wifi,
+                "Fast reconnect (Beta)",
+                if (fastStatus.isNotBlank()) fastStatus
+                else "Let Android auto-join the dash hotspot in the background",
+                control = {
+                    NorthstarToggle(
+                        fastReconnect && com.example.northstar.dash.FastReconnectManager.supported
+                    ) { on ->
+                        fastReconnect = on
+                        com.example.northstar.data.FastReconnectPrefs.setEnabled(ctx, on)
+                        fastStatus = com.example.northstar.dash.FastReconnectManager.sync(ctx)
+                    }
+                },
+            )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
             SettingRow(NorthstarIcons.Zap, "Stream quality", "Balanced · saves battery",
                 control = { Icon(NorthstarIcons.ChevronRight, null, tint = TextLo, modifier = Modifier.size(18.dp)) }, last = true)
         }
