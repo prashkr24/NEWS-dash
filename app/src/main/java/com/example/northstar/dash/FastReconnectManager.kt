@@ -45,7 +45,7 @@ object FastReconnectManager {
     @SuppressLint("MissingPermission")
     fun sync(context: Context): String {
         if (!supported) return "Needs Android 10 or newer"
-        val cfg = DashConfig(context)
+        val cfg = DashConfig.get(context)
         val ssid = cfg.ssid
         if (!FastReconnectPrefs.enabled(context)) {
             clear(context)
@@ -78,7 +78,7 @@ object FastReconnectManager {
     @SuppressLint("MissingPermission")
     fun clear(context: Context) {
         if (!supported) return
-        val cfg = DashConfig(context)
+        val cfg = DashConfig.get(context)
         if (cfg.ssid.isBlank()) return
         runCatching {
             wifi(context).removeNetworkSuggestions(listOf(buildSuggestion(cfg.ssid, cfg.password)))
