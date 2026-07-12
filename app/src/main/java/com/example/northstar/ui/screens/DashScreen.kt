@@ -131,16 +131,30 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
 
     val streaming = ui.stage == ConnStage.STREAMING
 
-    // Auto-connect on opening the Dash screen, so the rider doesn't tap "Connect" every
-    // ride — just open the app. Fires once; if the dash is off it errors out quietly and
-    // the rider can retry. (Needs permissions already granted from a prior run.)
-    // rememberSaveable so a config change (rotation/theme) doesn't reset this and silently
-    // reconnect after the rider deliberately disconnected.
-    var autoConnectTried by rememberSaveable { mutableStateOf(false) }
+    // Auto-connect: keep trying to link while the Dash screen is open and the dash isn't
+    // up yet — so the rider just opens the app and it "catches" the bike hotspot the moment
+    // it finishes broadcasting (~15-30s after ignition), instead of erroring once and making
+    // the rider tap Connect. Retries with backoff; stops as soon as we leave OFFLINE/ERROR,
+    // and never fights a deliberate disconnect (autoConnect pref gates it).
+    // rememberSaveable so rotation/theme changes don't reset the "user disconnected" intent.
+    var userDisconnected by rememberSaveable { mutableStateOf(false) }
+    val liveUi = rememberUpdatedState(ui)
     LaunchedEffect(Unit) {
-        if (!autoConnectTried && ui.stage == ConnStage.OFFLINE && hasEssentialPermissions()) {
-            autoConnectTried = true
-            vm.connect()
+        if (!com.example.northstar.data.DashPrefs.autoConnect(context)) return@LaunchedEffect
+        var delayMs = 2_000L
+        while (true) {
+            val stage = liveUi.value.stage
+            val idle = stage == ConnStage.OFFLINE || stage == ConnStage.ERROR
+            if (idle && !userDisconnected && hasEssentialPermissions() &&
+                (context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
+                    as android.net.wifi.WifiManager).isWifiEnabled
+            ) {
+                vm.connect()
+                delayMs = (delayMs + 1_000L).coerceAtMost(6_000L)  // gentle backoff, cap 6s
+            } else {
+                delayMs = 2_000L  // connected or not eligible → reset cadence for next time
+            }
+            kotlinx.coroutines.delay(delayMs)
         }
     }
 
@@ -264,7 +278,7 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
                     } else {
                         NorthstarBtn(
                             "Cancel",
-                            onClick = { vm.disconnect() },
+                            onClick = { userDisconnected = true; vm.disconnect() },
                             variant = BtnVariant.Ghost,
                             size = BtnSize.Sm,
                         )
@@ -499,13 +513,13 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
                 NorthstarIcons.Power,
                 onClick = {
                     when {
-                        streaming -> vm.disconnect()
+                        streaming -> { userDisconnected = true; vm.disconnect() }
                         ui.needsWifiOn -> runCatching {
                             context.startActivity(
                                 android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI)
                             )
                         }
-                        hasEssentialPermissions() -> connectWithBackgroundCheck()
+                        hasEssentialPermissions() -> { userDisconnected = false; connectWithBackgroundCheck() }
                         else -> permissionLauncher.launch(requestedPermissions)
                     }
                 },

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WayDash · dash overlay wireframe</title>
+<style>
+  :root{
+    --navy:#0A111C; --surf:#152136; --line:#28395A; --brava:#2E7CF6;
+    --hi:#EFF3FA; --mid:#93A3BC; --lo:#64748F; --gold:#C79A3A; --amber:#F4B740;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#05080f;color:var(--hi);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:28px 16px 60px;display:flex;flex-direction:column;align-items:center;gap:26px}
+  h1{font-size:19px;font-weight:800;letter-spacing:-.4px;margin:0}
+  .sub{color:var(--mid);font-size:13px;margin:-14px 0 0;text-align:center;max-width:520px;line-height:1.5}
+  .stage{position:relative;width:360px;height:360px}
+  /* the round dome */
+  .dome{position:absolute;inset:0;border-radius:50%;overflow:hidden;
+    border:9px solid #14181d;background:#0b0f14;
+    box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  /* upper map region (light, like the mappls/google raster) */
+  .map{position:absolute;left:0;right:0;top:0;height:64%;
+    background:linear-gradient(180deg,#e9ecf0 0%,#dfe4ea 100%)}
+  .road{position:absolute;background:#c4ccd6;transform-origin:center}
+  .r1{width:150%;height:26px;top:34%;left:-25%;transform:rotate(-32deg)}
+  .r2{width:150%;height:16px;top:60%;left:-25%;transform:rotate(-32deg)}
+  .poi{position:absolute;font-size:9px;color:#5a6673}
+  /* gold banner bottom */
+  .banner{position:absolute;left:0;right:0;bottom:0;height:36%;
+    background:linear-gradient(180deg,#b8912f,#7c5f1f)}
+  .banner .wm{position:absolute;left:16%;top:14%;color:#1b1608;font-weight:700;font-size:13px}
+  .banner .clock{position:absolute;left:16%;top:36%;color:#241d09;font-size:12px}
+  .banner .odo{position:absolute;left:16%;top:60%;color:#241d09;font-size:13px;font-weight:700}
+  .gearbox{position:absolute;right:11%;top:20%;width:120px;height:52px;background:#0c0c0c;
+    border-radius:12px;display:flex;align-items:center;justify-content:space-around;color:#fff}
+  .gearbox .g{font-size:26px;font-weight:800}
+  .gearbox .s{font-size:10px;line-height:1.1;color:#d8d8d8}
+  .gearbox .spd{font-size:26px;font-weight:800}
+
+  /* ---------- OVERLAYS (the new features) ---------- */
+  /* 1. GPS pill (existing, for reference) */
+  .gps{position:absolute;top:6%;left:50%;transform:translateX(-50%);
+    background:#111;color:#f4b740;font-size:10px;font-weight:700;
+    padding:3px 10px;border-radius:20px;z-index:5}
+  /* 2. message bubble (messenger style) */
+  .msg{position:absolute;top:15%;left:26%;display:flex;align-items:flex-start;gap:7px;z-index:7}
+  .avatar{width:34px;height:34px;border-radius:50%;background:var(--brava);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:16px;flex:0 0 auto}
+  .speech{background:rgba(16,26,40,.94);border:1.5px solid var(--brava);border-radius:14px;
+    padding:6px 11px;max-width:150px}
+  .speech .t{font-size:12px;font-weight:700;color:var(--hi);white-space:nowrap}
+  .speech .l{font-size:11px;color:var(--mid);margin-top:1px;white-space:nowrap}
+  /* 3. corner unread badge */
+  .badge{position:absolute;top:7%;right:9%;width:24px;height:24px;border-radius:50%;
+    background:var(--brava);border:1.5px solid #cfe0ff;color:#fff;font-size:11px;font-weight:800;
+    display:flex;align-items:center;justify-content:center;z-index:8}
+  /* native turn circle (existing) */
+  .turn{position:absolute;left:11%;top:40%;width:92px;height:92px;border-radius:50%;
+    border:1px solid #9aa;display:flex;align-items:center;justify-content:center;z-index:4}
+  .turn .pin{color:#d33;font-size:30px}
+  /* 5. call bubble over the turn-circle region */
+  .call{position:absolute;left:8%;top:38%;width:104px;height:104px;border-radius:50%;
+    background:rgba(11,13,14,.86);border:3px solid var(--brava);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;z-index:9}
+  .call .c{font-size:10px;color:var(--mid);font-weight:700;letter-spacing:1px}
+  .call .n{font-size:15px;color:var(--hi);font-weight:800}
+  .call .a{font-size:10px;color:var(--brava);font-weight:700}
+  /* you-arrow */
+  .you{position:absolute;left:52%;top:34%;color:var(--brava);font-size:22px;z-index:4}
+
+  .legend{max-width:520px;display:flex;flex-direction:column;gap:9px}
+  .row{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.45}
+  .num{flex:0 0 22px;height:22px;border-radius:50%;background:var(--brava);color:#fff;
+    font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;margin-top:1px}
+  .row b{color:var(--hi)} .row span{color:var(--mid)}
+  .toggle{display:flex;gap:8px;margin-top:2px}
+  .toggle button{background:var(--surf);color:var(--hi);border:1px solid var(--line);
+    border-radius:20px;padding:7px 15px;font-size:12px;font-weight:700;cursor:pointer}
+  .toggle button.on{background:var(--brava);border-color:var(--brava)}
+  .caption{color:var(--lo);font-size:11px;text-align:center;margin-top:2px}
+</style>
+</head>
+<body>
+  <h1>WayDash · dash overlay wireframe</h1>
+  <p class="sub">The round dome as it appears on your Tripper. Toggle the call state to see how the call bubble occupies the native turn-circle region. Positions and sizes match the v0.12 renderer.</p>
+
+  <div class="toggle">
+    <button id="bMsg" class="on" onclick="toggle('msg')">Message bubble</button>
+    <button id="bCall" class="on" onclick="toggle('call')">Incoming call</button>
+    <button id="bTurn" onclick="toggle('turn')">Native turn active</button>
+  </div>
+
+  <div class="stage">
+    <div class="dome">
+      <div class="map">
+        <div class="road r1"></div>
+        <div class="road r2"></div>
+        <div class="poi" style="top:26%;left:40%">Bhagyashri's Cake N Bake</div>
+        <div class="poi" style="top:46%;left:58%">Shri Mallikarjun Nilaya</div>
+        <div class="poi" style="top:60%;left:30%">2094 SLN Gokulam</div>
+        <div class="you">▲</div>
+      </div>
+      <div class="banner">
+        <div class="wm">WayDash</div>
+        <div class="clock">09:01 | 23°</div>
+        <div class="odo">ODO 4994 km</div>
+        <div class="gearbox"><span class="g">1</span><span class="s">Side<br>Stand</span><span class="spd">0<small style="font-size:10px">km/h</small></span></div>
+      </div>
+
+      <!-- existing -->
+      <div class="gps">GPS weak</div>
+      <div class="turn" id="ov-turn" style="display:none"><span class="pin">◉</span></div>
+
+      <!-- NEW FEATURES -->
+      <div class="msg" id="ov-msg">
+        <div class="avatar">P</div>
+        <div class="speech"><div class="t">Prashant</div><div class="l">reaching in 10 min</div></div>
+      </div>
+      <div class="badge" id="ov-badge">2</div>
+      <div class="call" id="ov-call">
+        <div class="c">CALL</div><div class="n">Rohit</div><div class="a">UP ✓ · DN ✕</div>
+      </div>
+    </div>
+  </div>
+  <p class="caption">Wireframe — not a live screenshot. Map area shown light (Google raster); MapLibre 3D mode would render this dark with tilted buildings.</p>
+
+  <div class="legend">
+    <div class="row"><div class="num">1</div><div><b>Message bubble (Messenger style)</b> — <span>blue avatar with sender initial + speech bubble, upper-left of the map, holds 7s.</span></div></div>
+    <div class="row"><div class="num">2</div><div><b>Corner unread badge</b> — <span>small count at the top-right edge; lingers 10 min after the bubble is gone.</span></div></div>
+    <div class="row"><div class="num">3</div><div><b>Call bubble</b> — <span>lands on the native turn-circle spot (lower-left). Toggle "Native turn active" to see the overlap caveat: the dash draws its own circle above our video during turn guidance.</span></div></div>
+    <div class="row"><div class="num">4</div><div><b>Predictable timing</b> — <span>one bubble at a time, full duration, queued — not visual, just steadier.</span></div></div>
+    <div class="row"><div class="num">5</div><div><b>Map</b> — <span>Mappls retired; Google raster (shown) or MapLibre 3D · Beta (dark, tilted buildings).</span></div></div>
+  </div>
+
+<script>
+  function toggle(k){
+    if(k==='msg'){const e=document.getElementById('ov-msg');const on=e.style.display!=='none';e.style.display=on?'none':'flex';document.getElementById('ov-badge').style.display=on?'none':'flex';document.getElementById('bMsg').classList.toggle('on',!on);}
+    if(k==='call'){const e=document.getElementById('ov-call');const on=e.style.display!=='none';e.style.display=on?'none':'flex';document.getElementById('bCall').classList.toggle('on',!on);}
+    if(k==='turn'){const e=document.getElementById('ov-turn');const on=e.style.display!=='none';e.style.display=on?'none':'flex';document.getElementById('bTurn').classList.toggle('on',!on);
+      // native turn draws above our call bubble
+      document.getElementById('ov-turn').style.zIndex=12;}
+  }
+</script>
+</body>
+</html>

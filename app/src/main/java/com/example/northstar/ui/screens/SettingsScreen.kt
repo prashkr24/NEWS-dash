@@ -45,13 +45,13 @@ fun SettingsScreen(
         src.split(" ", ".", "@").filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "?" }
     }
 
-    var autoConnect by remember { mutableStateOf(true) }
     var screenOff   by remember { mutableStateOf(true) }
     var keepAwake   by remember { mutableStateOf(true) }
     var units       by remember { mutableStateOf("Kilometres") }
 
     // Real voice setting, shared with RouteScreen via the VoiceManager singleton.
     val ctx = LocalContext.current
+    var autoConnect by remember { mutableStateOf(com.example.northstar.data.DashPrefs.autoConnect(ctx)) }
     val voiceManager = remember { com.example.northstar.dash.nav.VoiceManager.get(ctx) }
     val voiceMode by voiceManager.mode.collectAsState()
     val voice = when (voiceMode) {
@@ -98,8 +98,8 @@ fun SettingsScreen(
                 sub = when (conn) { ConnectionState.Connected -> "Connected"; ConnectionState.Searching -> "Connecting…"; ConnectionState.Offline -> "Not connected" },
                 control = { NorthstarChip(if (conn == ConnectionState.Connected) "Linked" else "Off", if (conn == ConnectionState.Connected) ChipTone.Gold else ChipTone.Off, dot = true) })
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
-            SettingRow(NorthstarIcons.Sync, "Auto-connect on start", "Link when the bike is near",
-                control = { NorthstarToggle(autoConnect) { autoConnect = it } })
+            SettingRow(NorthstarIcons.Sync, "Auto-connect on start", "Keeps trying to link while open — no Connect tap",
+                control = { NorthstarToggle(autoConnect) { autoConnect = it; com.example.northstar.data.DashPrefs.setAutoConnect(ctx, it) } })
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
             SettingRow(NorthstarIcons.Zap, "Stream quality", "Balanced · saves battery",
                 control = { Icon(NorthstarIcons.ChevronRight, null, tint = TextLo, modifier = Modifier.size(18.dp)) }, last = true)
