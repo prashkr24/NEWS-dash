@@ -212,6 +212,27 @@ class TileProvider(
         }
     }
 
+    /**
+     * Warm the tile cache around a single point (the rider's current location) BEFORE the
+     * dash link is up — called on app open / first GPS fix. Attacks the "map loads slowly
+     * on connect" problem: on a cold start nothing is cached, and tiles fetch over cellular
+     * exactly as the network routing settles, so the dash map crawls. Pre-warming means the
+     * tiles are already on disk when streaming begins.
+     */
+    fun prewarmLocation(lat: Double, lng: Double) {
+        scope.launch(Dispatchers.IO) {
+            var count = 0
+            // Dash rides at high zoom; warm the immediate area at the zooms it uses most,
+            // widest radius at the tightest zoom where tiles are smallest/most numerous.
+            for (z in 15..minOf(18, source.maxZoom)) {
+                val radius = if (z >= 17) 2 else 1
+                count += prefetchAround(lat, lng, z, radius)
+                if (count > MAX_PREFETCH_TILES) break
+            }
+            Log.i(TAG, "Prewarm (location) done — ~$count tiles ensured [${source.id}]")
+        }
+    }
+
     private fun prefetchAround(lat: Double, lng: Double, z: Int, radius: Int): Int {
         val cx = Mercator.lngToTileX(lng, z).toInt()
         val cy = Mercator.latToTileY(lat, z).toInt()

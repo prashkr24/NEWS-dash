@@ -140,6 +140,7 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
     var userDisconnected by rememberSaveable { mutableStateOf(false) }
     val liveUi = rememberUpdatedState(ui)
     LaunchedEffect(Unit) {
+        vm.prewarmMap()  // warm tiles around current location before the link is up
         if (!com.example.northstar.data.DashPrefs.autoConnect(context)) return@LaunchedEffect
         var delayMs = 2_000L
         while (true) {
@@ -160,16 +161,21 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
 
     // If the rider was prompted to turn Wi‑Fi on and comes back to the app with it now enabled
     // (e.g. from the Wi‑Fi panel), retry the connection automatically — no second tap needed.
-    val uiState = rememberUpdatedState(ui)
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 batteryOk = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(context)
-                if (uiState.value.needsWifiOn &&
-                    (context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
-                        as android.net.wifi.WifiManager).isWifiEnabled &&
-                    hasEssentialPermissions()
+                vm.prewarmMap()  // refresh warm tiles for wherever we are now
+                val wifiOn = (context.applicationContext.getSystemService(android.content.Context.WIFI_SERVICE)
+                    as android.net.wifi.WifiManager).isWifiEnabled
+                val idle = liveUi.value.stage == ConnStage.OFFLINE || liveUi.value.stage == ConnStage.ERROR
+                // Case A: rider enabled Wi-Fi from the panel and came back → retry.
+                // Case B: Fast reconnect (Option 2) auto-joined the dash hotspot while the app
+                // was backgrounded → coming back should connect instantly, not wait for the loop.
+                if (wifiOn && hasEssentialPermissions() && idle && !userDisconnected &&
+                    (liveUi.value.needsWifiOn ||
+                        com.example.northstar.data.DashPrefs.autoConnect(context))
                 ) {
                     vm.connect()
                 }

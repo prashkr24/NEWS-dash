@@ -440,6 +440,16 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Connection ─────────────────────────────────────────────────────────
 
+    /**
+     * Warm the tile cache around the rider's current location while the app is open, before
+     * the dash link is up — so the dash map appears fast on connect instead of fetching cold
+     * over cellular as the network settles. Cheap: uses last-known location, no GPS start.
+     */
+    fun prewarmMap() {
+        val loc = location.lastKnown() ?: return
+        tiles.prewarmLocation(loc.latitude, loc.longitude)
+    }
+
     fun connect() {
         userWantsConnection = true
         authAttempts = 0
