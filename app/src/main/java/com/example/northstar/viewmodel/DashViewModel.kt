@@ -1254,17 +1254,34 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         if (callOverlaySinceMs == 0L) callOverlaySinceMs = now
         if (now - callOverlaySinceMs > 60_000) return
 
-        // Rider feedback: the dash's native turn-circle (lower-left of the dome) is
-        // unused space during a call — draw the call bubble THERE instead of centre-
-        // screen, over/beside the circle region, leaving the road ahead visible.
-        val cx = w * 0.20f; val cy = h * 0.66f
-        val r = h * 0.195f
-        canvas.drawCircle(cx, cy, r, ovBg)
-        canvas.drawCircle(cx, cy, r, ovRing)
-        canvas.drawText("CALL", cx, cy - r * 0.32f, ovSub)
-        canvas.drawText(ellipsizeOverlay(call.caller, 10), cx, cy + 5f, ovTitle)
-        canvas.drawText("UP ✓ · DN ✕", cx, cy + r * 0.52f, ovAccent)
+        // The dash's native turn-circle (lower-left) is drawn by the FIRMWARE on top of our
+        // video, so a bubble placed there gets hidden behind it (confirmed on the road). Draw
+        // the call card in the clear upper-map band instead — same safe zone as the message
+        // bubbles, where nothing composites over us. Shows source (e.g. "WhatsApp call") + name.
+        val header = when {
+            call.source.isNotBlank() -> "${call.source} call".uppercase()
+            else -> "INCOMING CALL"
+        }
+        val name = ellipsizeOverlay(call.caller, 20)
+        val control = if (call.displayOnly) "on phone to answer" else "UP ✓ · DN ✕"
+
+        val padH = 18f; val padV = 10f
+        val fmName = ovTitle.fontMetrics
+        val nameH = fmName.descent - fmName.ascent
+        val subH = 13f
+        val cardW = (maxOf(ovTitle.measureText(name), ovSub.measureText(header) + 20f))
+            .coerceAtMost(w * 0.8f) + padH * 2
+        val cardH = padV * 2 + nameH + subH * 2 + 8f
+        val cxp = w / 2f
+        val top = 14f
+        callRect.set(cxp - cardW / 2f, top, cxp + cardW / 2f, top + cardH)
+        canvas.drawRoundRect(callRect, 16f, 16f, ovBg)
+        canvas.drawRoundRect(callRect, 16f, 16f, ovRing)
+        canvas.drawText(header, cxp, top + padV - ovSub.fontMetrics.ascent, ovSub)
+        canvas.drawText(name, cxp, top + padV + subH + 4f - fmName.ascent, ovTitle)
+        canvas.drawText(control, cxp, top + cardH - padV, ovAccent)
     }
+    private val callRect = android.graphics.RectF()
     @Volatile private var callOverlaySinceMs = 0L
 
     private fun ellipsizeOverlay(s: String, max: Int) = if (s.length > max) s.take(max - 1) + "…" else s

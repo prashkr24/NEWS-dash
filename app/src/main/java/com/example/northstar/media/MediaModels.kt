@@ -23,4 +23,8 @@ data class IncomingCall(
     val incoming: Boolean = true,
     val answerIntent: PendingIntent? = null,
     val declineIntent: PendingIntent? = null,
+    /** Where the call is from: null/"" = normal cellular; else app label e.g. "WhatsApp". */
+    val source: String = "",
+    /** True for VoIP calls we can only DISPLAY (no answer/reject control from the joystick). */
+    val displayOnly: Boolean = false,
 )

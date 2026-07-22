@@ -17,6 +17,16 @@ class NorthstarNotificationListener : NotificationListenerService() {
 
     private companion object {
         const val TAG = "NsNotifListener"
+        // VoIP apps whose CATEGORY_CALL notifications we can DISPLAY on the dash (name only;
+        // answer/reject from the joystick isn't reliably available for these).
+        val VOIP_CALL_PACKAGES = mapOf(
+            "com.whatsapp" to "WhatsApp",
+            "com.whatsapp.w4b" to "WhatsApp",
+            "com.microsoft.teams" to "Teams",
+            "com.skype.raider" to "Skype",
+            "org.telegram.messenger" to "Telegram",
+            "com.google.android.apps.tachyon" to "Meet",   // Google Meet/Duo
+        )
         // Common Indian-market messaging apps whose notifications become dash alerts.
         // Category-based detection covers the rest.
         val MESSAGING_PACKAGES = setOf(
@@ -58,10 +68,25 @@ class NorthstarNotificationListener : NotificationListenerService() {
         lastCallKey = sbn.key
         val (answer, decline) = extractActions(n, incoming)
         val caller = callerName(n).ifBlank { if (incoming) "Call" else "On call" }
+        // VoIP calls (WhatsApp/Teams/etc.) also post CATEGORY_CALL. We can DISPLAY them with
+        // the app name, but their answer/reject actions aren't reliably controllable from the
+        // joystick the way the system dialer's are — so mark display-only and skip wiring
+        // joystick answer/reject for them. Normal cellular calls keep full control.
+        val voipLabel = VOIP_CALL_PACKAGES[sbn.packageName]
+        val isVoip = voipLabel != null
         com.example.northstar.data.RideDiagnostics.log("media",
-            "${if (incoming) "INCOMING" else "ACTIVE"} call: '$caller' (answerAct=${answer != null} declineAct=${decline != null})")
-        CallInfoProvider.update(IncomingCall(caller, incoming, answer, decline))
-        Log.d(TAG, "call($incoming): $caller")
+            "${if (incoming) "INCOMING" else "ACTIVE"} ${voipLabel ?: "phone"} call: '$caller' (answerAct=${answer != null} declineAct=${decline != null})")
+        CallInfoProvider.update(
+            IncomingCall(
+                caller = caller,
+                incoming = incoming,
+                answerIntent = if (isVoip) null else answer,
+                declineIntent = if (isVoip) null else decline,
+                source = voipLabel ?: "",
+                displayOnly = isVoip,
+            )
+        )
+        Log.d(TAG, "call($incoming, src=${voipLabel ?: "phone"}): $caller")
     }
 
     /**
