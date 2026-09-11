@@ -464,6 +464,30 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
             NorthstarToggle(on = ui.headingUp, onChange = { vm.toggleHeadingUp() })
         }
 
+        Spacer(Modifier.height(10.dp))
+
+        // Tilted perspective view toggle (pitch map forward to see what's coming ahead)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Surf1)
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(NorthstarIcons.Route, null, tint = if (ui.tiltedView) Gold else TextMid, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(11.dp))
+                Column {
+                    Text("Tilted 3D view", color = TextHi, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
+                    Text(if (ui.tiltedView) "Perspective tilt to see road ahead" else "Flat top-down view", color = TextLo, fontSize = 11.5.sp, modifier = Modifier.padding(top = 1.dp))
+                }
+            }
+            NorthstarToggle(on = ui.tiltedView, onChange = { vm.toggleTiltedView() })
+        }
+
         Spacer(Modifier.height(16.dp))
 
         // Pan pad (full width) — drives the actual dash map in adjust mode

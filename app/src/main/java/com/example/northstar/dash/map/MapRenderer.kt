@@ -133,9 +133,9 @@ class MapRenderer(private val tiles: TileProvider) {
         val rotate = f.headingUp
         val tilt = rotate && f.tilt3d
         // Nav view: bias the rider toward the lower third so the road AHEAD fills the
-        // screen (like Google Maps navigation). 3D pushes it lower still. North-up
-        // view keeps the rider centred.
-        val pivotY = if (rotate) (if (tilt) h * 0.74f else h * 0.66f) else h / 2f
+        // screen (like Google Maps navigation). 3D pushes it lower still to 76% so
+        // oncoming turns/roads recede into the distance. North-up view keeps the rider centred.
+        val pivotY = if (rotate) (if (tilt) h * 0.76f else h * 0.66f) else h / 2f
 
         val ts = Mercator.TILE_SIZE
         val cx = Mercator.lngToTileX(f.centerLng, f.zoom) * ts + f.panX
@@ -149,28 +149,36 @@ class MapRenderer(private val tiles: TileProvider) {
         if (rotate && !skipBaseMap) {
             canvas.save()
             if (tilt) {
-                // Perspective tilt: warp the flat frame into a trapezoid that converges
-                // toward the top, so the road ahead recedes into the distance (the
-                // Google-Maps 3D look). Near things (rider, bottom) stay ~undistorted;
-                // far things (dest, route ahead) shrink, which is exactly right.
-                val inset = w * 0.18f
-                tiltSrc[0] = 0f;          tiltSrc[1] = 0f
-                tiltSrc[2] = w.toFloat(); tiltSrc[3] = 0f
-                tiltSrc[4] = w.toFloat(); tiltSrc[5] = h.toFloat()
-                tiltSrc[6] = 0f;          tiltSrc[7] = h.toFloat()
-                tiltDst[0] = inset;          tiltDst[1] = 0f
-                tiltDst[2] = w - inset;      tiltDst[3] = 0f
-                tiltDst[4] = w.toFloat();    tiltDst[5] = h.toFloat()
-                tiltDst[6] = 0f;             tiltDst[7] = h.toFloat()
+                // Perspective tilt: projects a forward-expanding trapezoid of the road
+                // ahead onto the screen, so oncoming curves and junctions recede into
+                // the distance (Google Maps / motorcycle GPS navigation view).
+                // Near ground (at the rider/bottom) remains 1:1 scale; distant ground
+                // (up to ~600px ahead) expands field-of-view and foreshortens naturally.
+                val wNear = w.toFloat()
+                val wFar = w * 2.25f
+                val aheadReach = h * 2.1f
+                val yFar = pivotY - aheadReach
+                val yNear = h.toFloat()
+
+                tiltSrc[0] = (w / 2f) - (wFar / 2f);  tiltSrc[1] = yFar
+                tiltSrc[2] = (w / 2f) + (wFar / 2f);  tiltSrc[3] = yFar
+                tiltSrc[4] = (w / 2f) + (wNear / 2f); tiltSrc[5] = yNear
+                tiltSrc[6] = (w / 2f) - (wNear / 2f); tiltSrc[7] = yNear
+
+                tiltDst[0] = 0f;          tiltDst[1] = 0f
+                tiltDst[2] = w.toFloat(); tiltDst[3] = 0f
+                tiltDst[4] = w.toFloat(); tiltDst[5] = h.toFloat()
+                tiltDst[6] = 0f;          tiltDst[7] = h.toFloat()
+
                 tiltMatrix.setPolyToPoly(tiltSrc, 0, tiltDst, 0, 4)
                 canvas.concat(tiltMatrix)
             }
             canvas.rotate(-f.heading, w / 2f, pivotY)
         }
 
-        // ── Tiles (padded when rotating so corners are covered) ──
+        // ── Tiles (padded when rotating or tilting so the entire frustum is covered) ──
         if (!skipBaseMap) {
-        val pad = if (rotate) (maxOf(w, h) * 0.45).toInt() else 0
+        val pad = if (tilt) (maxOf(w, h) * 1.55).toInt() else if (rotate) (maxOf(w, h) * 0.45).toInt() else 0
         val txMin = Math.floorDiv((left - pad).toInt(), ts)
         val tyMin = Math.floorDiv((top - pad).toInt(), ts)
         val txMax = Math.floorDiv((left + w + pad).toInt(), ts)
@@ -222,7 +230,7 @@ class MapRenderer(private val tiles: TileProvider) {
                 riderPath.lineTo(rx + 7f, ry + 7f)
                 riderPath.close()
                 canvas.save()
-                if (!skipBaseMap) canvas.rotate(f.heading, rx, ry)
+                // In heading-up / tilted mode, travel direction is already aligned straight up
                 dotPaint.color = Color.WHITE; canvas.drawCircle(rx, ry, 9f, dotPaint)
                 dotPaint.color = markerColor; canvas.drawPath(riderPath, dotPaint)
                 canvas.restore()

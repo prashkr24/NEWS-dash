@@ -56,6 +56,7 @@ data class DashUiState(
     val offRoute: Boolean = false,
     val recalculating: Boolean = false, // off-route long enough / actively rerouting → ETA frozen, pill shows "Recalculating"
     val headingUp: Boolean = true,
+    val tiltedView: Boolean = true,
     val followMode: Boolean = true,
     val thermal: String = "OK",
     val needsWifiOn: Boolean = false,   // Wi‑Fi radio is off → UI prompts to enable it
@@ -68,7 +69,12 @@ data class DashUiState(
 )
 
 class DashViewModel(app: Application) : AndroidViewModel(app) {
-    private val _ui = MutableStateFlow(DashUiState(mapZoom = com.example.northstar.data.DashPrefs.zoom(app)))
+    private val _ui = MutableStateFlow(
+        DashUiState(
+            mapZoom = com.example.northstar.data.DashPrefs.zoom(app),
+            tiltedView = com.example.northstar.data.DashPrefs.tiltedView(app),
+        )
+    )
     val ui = _ui.asStateFlow()
 
     // The EXACT frame being H.264-encoded to the dash, published for the in-app "Dash view"
@@ -130,6 +136,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var lastNextManeuver: com.example.northstar.dash.nav.Maneuver? = null
     @Volatile private var lastNextTurnM: Double = Double.MAX_VALUE  // restored last-used zoom (persists across close/upgrade)
     @Volatile private var headingUp = true
+    @Volatile private var tiltedView = com.example.northstar.data.DashPrefs.tiltedView(app)
     @Volatile private var followMode = true
     @Volatile private var lastManualPanAt = 0L
 
@@ -699,6 +706,12 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         headingUp = !headingUp
         _ui.update { it.copy(headingUp = headingUp) }
     }
+    fun toggleTiltedView() {
+        tiltedView = !tiltedView
+        com.example.northstar.data.DashPrefs.setTiltedView(getApplication(), tiltedView)
+        _ui.update { it.copy(tiltedView = tiltedView) }
+        lastSignature = ""
+    }
 
     private fun manualPan(dx: Float, dy: Float) {
         panX += dx; panY += dy
@@ -1082,6 +1095,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             append("%.6f".format(centerLat)); append("%.6f".format(centerLng))
             append(zoom); append(panX.toInt()); append(panY.toInt())
             append(if (headingUp) (camHeading * 10).toInt() else 0)
+            append(if (tiltedView && headingUp) "T" else "F")
             append(remainingM?.let { (it / 100).toInt() } ?: -1) // 100 m resolution to avoid jitter
             append(if (r != null) r.geometry.size else 0)
             // Include the incoming-call caller so a call arriving forces an immediate redraw of the
@@ -1188,10 +1202,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             alertLine = dashAlert?.line,
             alertBadge = com.example.northstar.dash.DashAlertBus.badgeCount(),
             remainingText = remainingM?.let { fmtDist(it) },
-            // Top-down (heading-up) nav view. The 3D perspective tilt is DISABLED: warping
-            // flat raster tiles via setPolyToPoly stretches the baked-in map labels and
-            // skews the angle (you can't get true Google-Maps 3D without vector tiles).
-            tilt3d = false,
+            // Tilted perspective view for heading-up navigation (shows oncoming road ahead).
+            tilt3d = tiltedView && headingUp && (loc != null),
             etaPrimary = etaPrimary,
             etaSecondary = etaSecondary,
             gpsWeak = gpsStatus == GpsStatus.WEAK,
