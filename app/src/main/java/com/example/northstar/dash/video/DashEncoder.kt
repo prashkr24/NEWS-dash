@@ -66,25 +66,36 @@ class DashEncoder(private val onEncodedData: (ByteArray, Boolean) -> Unit) {
         // Prefer an explicit HARDWARE AVC encoder — a software fallback runs the
         // CPU hot, which is exactly what this whole project exists to avoid.
         val name = selectHardwareEncoder(format)
-        codec = (if (name != null) MediaCodec.createByCodecName(name)
-                 else MediaCodec.createEncoderByType(MIME)).also { c ->
-            Log.i(TAG, "Encoder: ${c.name}")
-            c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            inputSurface = c.createInputSurface()
-            c.start()
+        val c = try {
+            val candidate = if (name != null) MediaCodec.createByCodecName(name)
+                            else MediaCodec.createEncoderByType(MIME)
+            candidate.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            candidate
+        } catch (e: Exception) {
+            Log.w(TAG, "Preferred encoder '$name' failed configure (${e.message}), falling back to default AVC")
+            MediaCodec.createEncoderByType(MIME).also {
+                it.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
         }
+        Log.i(TAG, "Encoder: ${c.name}")
+        inputSurface = c.createInputSurface()
+        c.start()
+        codec = c
     }
 
     /** Find a hardware AVC encoder that supports this format; null → let the OS pick. */
     private fun selectHardwareEncoder(format: MediaFormat): String? {
         val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-        // First try true hardware-accelerated encoders (API 29+ flag).
+        // First try true hardware-accelerated encoders (API 29+ flag) that support our format.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             for (info in list.codecInfos) {
                 if (!info.isEncoder) continue
                 if (!info.supportedTypes.any { it.equals(MIME, true) }) continue
                 if (info.isHardwareAccelerated && !info.isSoftwareOnly) {
-                    return info.name
+                    val supported = runCatching {
+                        info.getCapabilitiesForType(MIME).isFormatSupported(format)
+                    }.getOrDefault(true)
+                    if (supported) return info.name
                 }
             }
         }
@@ -125,6 +136,8 @@ class DashEncoder(private val onEncodedData: (ByteArray, Boolean) -> Unit) {
                     // NAL processor needs the parameter sets to bundle them with each IDR,
                     // otherwise the dash can't initialise its decoder and times out.
                     if (info.size > 0) {
+                        buf.position(info.offset)
+                        buf.limit(info.offset + info.size)
                         val data = ByteArray(info.size).also { buf.get(it) }
                         onEncodedData(data, isKey)
                     }

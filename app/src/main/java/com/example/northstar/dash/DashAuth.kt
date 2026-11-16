@@ -26,10 +26,13 @@ sealed class AuthEvent {
  * packets — so state accumulates across calls. The session-key packet is
  * emitted exactly once per attempt; [reset] re-arms it after a rejection.
  */
-class DashAuth(private val ssid: String) {
+class DashAuth(@Volatile var ssid: String) {
     private var modulus: BigInteger? = null
     private var exponent: BigInteger? = null
     private var keySent = false
+
+    val hasPubKey: Boolean
+        get() = modulus != null && exponent != null
 
     var sessionKey: ByteArray? = null
         private set

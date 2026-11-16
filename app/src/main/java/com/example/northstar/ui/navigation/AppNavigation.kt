@@ -45,6 +45,7 @@ sealed class Screen(val route: String) {
     object Home     : Screen("home")
     object Route    : Screen("route")
     object Dash     : Screen("dash")
+    object BikeHub  : Screen("bike_hub")
     object Garage   : Screen("garage")
     object Rides    : Screen("rides")
     object Discovery: Screen("discovery")
@@ -53,27 +54,33 @@ sealed class Screen(val route: String) {
 
 private data class NavTab(val screen: Screen, val icon: ImageVector, val label: String)
 
-private val bottomTabs = listOf(
-    NavTab(Screen.Home,   NorthstarIcons.Home,    "Home"),
-    NavTab(Screen.Route,  NorthstarIcons.Navi,    "Route"),
-    NavTab(Screen.Dash,   NorthstarIcons.Dash,    "Dash"),
-    NavTab(Screen.Discovery, NorthstarIcons.Bt,    "Signals"),
-    // Garage hidden for now — re-enable by uncommenting this line (screen code kept intact).
-    // NavTab(Screen.Garage, NorthstarIcons.Wrench,  "Garage"),
-    NavTab(Screen.Rides,  NorthstarIcons.History, "Rides"),
+private val v2BottomTabs = listOf(
+    NavTab(Screen.Home,     NorthstarIcons.Navi,    "Explore"),
+    NavTab(Screen.Dash,     NorthstarIcons.Dash,    "Dash"),
+    NavTab(Screen.BikeHub,  NorthstarIcons.Motor,   "My Bike"),
+    NavTab(Screen.Settings, NorthstarIcons.Gear,    "Settings"),
+)
+
+private val v1BottomTabs = listOf(
+    NavTab(Screen.Home,      NorthstarIcons.Home,    "Home"),
+    NavTab(Screen.Route,     NorthstarIcons.Navi,    "Route"),
+    NavTab(Screen.Dash,      NorthstarIcons.Dash,    "Dash"),
+    NavTab(Screen.Discovery, NorthstarIcons.Bt,      "Signals"),
+    NavTab(Screen.Rides,     NorthstarIcons.History, "Rides"),
 )
 
 @Composable
 fun AppNavigation(
     authViewModel: AuthViewModel = viewModel(),
     appViewModel: AppViewModel = viewModel(),
-    dashViewModel: DashViewModel = viewModel(),
+    dashViewModel: DashViewModel = DashViewModel.getInstance(androidx.compose.ui.platform.LocalContext.current),
     routeViewModel: RouteViewModel = viewModel(),
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    var uiVersion by remember { mutableIntStateOf(com.example.northstar.data.DashPrefs.uiVersion(ctx)) }
 
     // Analytics screen_view per destination. A single-Activity Compose app doesn't auto-log these,
     // so feed each nav route to Analytics — that's what makes per-feature usage (and time spent on
@@ -102,8 +109,8 @@ fun AppNavigation(
     }
 
     val showBottomNav = currentRoute in listOf(
-        Screen.Home.route, Screen.Route.route, Screen.Dash.route,
-        Screen.Garage.route, Screen.Rides.route, Screen.Discovery.route,
+        Screen.Home.route, Screen.Route.route, Screen.Dash.route, Screen.BikeHub.route,
+        Screen.Garage.route, Screen.Rides.route, Screen.Discovery.route, Screen.Settings.route,
     )
 
     val garageTab by appViewModel.garageTab.collectAsState()
@@ -134,11 +141,12 @@ fun AppNavigation(
         if (d?.lat != null && d.lng != null) dashViewModel.prefetchTiles(d.lat, d.lng)
     }
 
-    // Auto-navigate to Route when a Maps share arrives
+    // Auto-navigate when a Maps share arrives
     LaunchedEffect(routeState.pendingNavigate, currentRoute) {
         if (routeState.pendingNavigate && currentRoute != null && currentRoute != Screen.Login.route) {
-            if (currentRoute != Screen.Route.route) {
-                navController.navigate(Screen.Route.route) { launchSingleTop = true }
+            val target = if (uiVersion == 2) Screen.Home.route else Screen.Route.route
+            if (currentRoute != target) {
+                navigateTab(target)
             }
             routeViewModel.onNavigated()
         }
@@ -169,21 +177,28 @@ fun AppNavigation(
                 }
 
                 composable(Screen.Home.route) {
-                    HomeScreen(
-                        conn = conn,
-                        onNavigate = { dest ->
-                            when (dest) {
-                                // Top-level destinations go through the shared tab navigation so the
-                                // back stack stays consistent with the bottom bar (see navigateTab).
-                                "route" -> navigateTab(Screen.Route.route)
-                                "dash" -> navigateTab(Screen.Dash.route)
-                                "garage" -> navigateTab(Screen.Garage.route)
-                                // Settings is a detail screen (its own back), not a tab.
-                                "settings" -> navController.navigate(Screen.Settings.route)
-                            }
-                        },
-                        routeViewModel = routeViewModel,
-                    )
+                    if (uiVersion == 2) {
+                        V2ExploreScreen(
+                            dashViewModel = dashViewModel,
+                            routeViewModel = routeViewModel,
+                            onOpenDash = { navigateTab(Screen.Dash.route) },
+                            onOpenBikeHub = { navigateTab(Screen.BikeHub.route) },
+                            onOpenSettings = { navigateTab(Screen.Settings.route) },
+                        )
+                    } else {
+                        HomeScreen(
+                            conn = conn,
+                            onNavigate = { dest ->
+                                when (dest) {
+                                    "route" -> navigateTab(Screen.Route.route)
+                                    "dash" -> navigateTab(Screen.Dash.route)
+                                    "garage" -> navigateTab(Screen.Garage.route)
+                                    "settings" -> navController.navigate(Screen.Settings.route)
+                                }
+                            },
+                            routeViewModel = routeViewModel,
+                        )
+                    }
                 }
 
                 composable(Screen.Route.route) {
@@ -196,8 +211,6 @@ fun AppNavigation(
                                 lat  = routeState.destination?.lat,
                                 lng  = routeState.destination?.lng,
                             )
-                            // Start navigation: open the dash view and begin the
-                            // WiFi → auth → stream flow (no-op if already streaming).
                             dashViewModel.connect()
                             navController.navigate(Screen.Dash.route) {
                                 popUpTo(Screen.Home.route)
@@ -209,7 +222,15 @@ fun AppNavigation(
                 composable(Screen.Dash.route) {
                     DashScreen(
                         vm = dashViewModel,
-                        onOpenSettings = { navController.navigate(Screen.Settings.route) },
+                        onOpenSettings = { navigateTab(Screen.Settings.route) },
+                    )
+                }
+
+                composable(Screen.BikeHub.route) {
+                    BikeHubScreen(
+                        appViewModel = appViewModel,
+                        routeViewModel = routeViewModel,
+                        onNavigateToBike = { navigateTab(Screen.Home.route) },
                     )
                 }
 
@@ -240,6 +261,9 @@ fun AppNavigation(
                             }
                         },
                         onBack = { navController.popBackStack() },
+                        uiVersion = uiVersion,
+                        onUiVersionChange = { uiVersion = it },
+                        onOpenDiscovery = { navController.navigate(Screen.Discovery.route) },
                     )
                 }
             }
@@ -255,6 +279,7 @@ fun AppNavigation(
                 contentAlignment = Alignment.BottomCenter,
             ) {
                 NorthstarBottomNav(
+                    tabs = if (uiVersion == 2) v2BottomTabs else v1BottomTabs,
                     currentRoute = currentRoute,
                     onNavSelect = { screen -> navigateTab(screen.route) },
                 )
@@ -265,6 +290,7 @@ fun AppNavigation(
 
 @Composable
 private fun NorthstarBottomNav(
+    tabs: List<NavTab>,
     currentRoute: String?,
     onNavSelect: (Screen) -> Unit,
 ) {
@@ -279,7 +305,7 @@ private fun NorthstarBottomNav(
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        bottomTabs.forEach { tab ->
+        tabs.forEach { tab ->
             val active = currentRoute == tab.screen.route
             val pillAlpha by animateFloatAsState(
                 if (active) 1f else 0f,

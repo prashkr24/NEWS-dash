@@ -119,10 +119,19 @@ class DashWifiManager(
     @SuppressLint("MissingPermission")
     fun findDashSsid(prefix: String): String? = try {
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        wifi.scanResults
+        // Trigger a fresh scan in case cached scanResults are stale
+        runCatching {
+            @Suppress("DEPRECATION")
+            wifi.startScan()
+        }
+        val fromScan = wifi.scanResults
             .mapNotNull { it.SSID?.trim('"')?.takeIf { s -> s.isNotBlank() } }
             .firstOrNull { it.startsWith(prefix) }
-            .also { Log.i(TAG, "Scan lookup for '$prefix*' → ${it ?: "not found"}") }
+        val fromConn = runCatching {
+            @Suppress("DEPRECATION")
+            wifi.connectionInfo?.ssid?.trim('"')?.takeIf { it.startsWith(prefix) && it != WifiManagerUnknownSsid }
+        }.getOrNull()
+        (fromScan ?: fromConn).also { Log.i(TAG, "Scan lookup for '$prefix*' → ${it ?: "not found"}") }
     } catch (e: Exception) {
         Log.w(TAG, "Scan lookup failed: ${e.message}"); null
     }
@@ -139,6 +148,16 @@ class DashWifiManager(
 
     private fun requestNetwork() {
         release()
+        // If we are still on a prefix, check scan results one more time right before requesting
+        if (pendingPrefix) {
+            findDashSsid(pendingSsid)?.let { exact ->
+                Log.i(TAG, "Upgraded prefix '$pendingSsid' to exact SSID '$exact' from scan")
+                pendingSsid = exact
+                pendingPrefix = false
+                onSsidResolved?.invoke(exact)
+            }
+        }
+
         Log.i(TAG, "Requesting WiFi: '$pendingSsid' " +
             "(${if (pendingPrefix) "prefix" else "exact"}, password=${if (pendingPassword.isBlank()) "none" else "set"})")
         _state.value = WifiState(status = WifiConnStatus.REQUESTING, ssid = pendingSsid)
@@ -150,71 +169,25 @@ class DashWifiManager(
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .setNetworkSpecifier(specBuilder.build())
             .build()
 
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                this@DashWifiManager.network = network
-                everConnected = true
-                reconnectJob?.cancel()
-                // SSID is read in onCapabilitiesChanged (transportInfo isn't populated here
-                // yet on Android 13+). Try once anyway, else fall back to the pending value.
-                val resolved = resolveSsid(network).takeIf { it.isNotBlank() } ?: pendingSsid
-                Log.i(TAG, "WiFi connected ✓  ssid='$resolved' network=$network")
-                if (resolved.isNotBlank() && resolved != pendingSsid) onSsidResolved?.invoke(resolved)
-                _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = resolved)
+        val cb = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
+                override fun onAvailable(network: Network) = handleAvailable(network)
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+                    handleCaps(network, caps)
+                override fun onUnavailable() = handleUnavailable()
+                override fun onLost(network: Network) = handleLost(network)
             }
-
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                // Canonical place to read the connected SSID — REQUIRED for auth, since the
-                // dash validates the SSID inside the encrypted handshake (DashAuth). Without
-                // the real SSID (prefix-discovery), every auth is rejected.
-                val info = caps.transportInfo as? WifiInfo ?: return
-                val ssid = info.ssid.orEmpty().trim('"')
-                if (ssid.isBlank() || ssid == WifiManagerUnknownSsid) return
-                if (ssid == resolvedSsid) return
-                resolvedSsid = ssid
-                this@DashWifiManager.network = network
-                Log.i(TAG, "Resolved dash SSID: '$ssid'")
-                onSsidResolved?.invoke(ssid)
-                _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = ssid)
-            }
-
-            override fun onUnavailable() {
-                this@DashWifiManager.network = null
-                // Mid-ride drop where the dash AP went missing (we HAD connected): keep retrying so a
-                // dash that's hung — and revived by a bike power-cycle — auto-rejoins with no manual
-                // step. The ViewModel's reconnect-giveup timer still bounds this if it never returns.
-                if (everConnected && wantConnected) {
-                    Log.w(TAG, "WiFi unavailable mid-session — dash AP missing, retrying in ${RECONNECT_DELAY}ms")
-                    _state.value = WifiState(
-                        status = WifiConnStatus.REQUESTING,
-                        ssid   = pendingSsid,
-                        error  = "Dash WiFi lost — reconnecting…",
-                    )
-                    scheduleReconnect()
-                    return
-                }
-                // Failed INITIAL connect / user declined the dialog → give up.
-                Log.w(TAG, "WiFi unavailable — SSID not found or user declined")
-                _state.value = WifiState(
-                    status = WifiConnStatus.ERROR,
-                    ssid   = pendingSsid,
-                    error  = "Could not connect to '$pendingSsid' — network not found or wrong password",
-                )
-                wantConnected = false
-            }
-
-            override fun onLost(network: Network) {
-                Log.w(TAG, "WiFi link lost — reconnecting in ${RECONNECT_DELAY}ms")
-                this@DashWifiManager.network = null
-                _state.value = WifiState(
-                    status = WifiConnStatus.REQUESTING,
-                    ssid   = pendingSsid,
-                    error  = "Link lost — reconnecting…",
-                )
-                if (wantConnected) scheduleReconnect()
+        } else {
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = handleAvailable(network)
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+                    handleCaps(network, caps)
+                override fun onUnavailable() = handleUnavailable()
+                override fun onLost(network: Network) = handleLost(network)
             }
         }
 
@@ -231,6 +204,68 @@ class DashWifiManager(
         }
     }
 
+    private fun handleAvailable(network: Network) {
+        this@DashWifiManager.network = network
+        everConnected = true
+        reconnectJob?.cancel()
+        val resolved = resolveSsid(network).takeIf { it.isNotBlank() }
+            ?: findDashSsid(DashConfig.DEFAULT_PREFIX)
+            ?: pendingSsid
+        Log.i(TAG, "WiFi connected ✓  ssid='$resolved' network=$network")
+        if (resolved.isNotBlank() && !resolved.endsWith("_")) {
+            resolvedSsid = resolved
+            onSsidResolved?.invoke(resolved)
+        }
+        _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = resolved)
+    }
+
+    private fun handleCaps(network: Network, caps: NetworkCapabilities) {
+        val info = caps.transportInfo as? WifiInfo
+        val rawSsid = info?.ssid.orEmpty().trim('"')
+        val ssid = if (rawSsid.isBlank() || rawSsid == WifiManagerUnknownSsid) {
+            findDashSsid(DashConfig.DEFAULT_PREFIX).orEmpty()
+        } else rawSsid
+        if (ssid.isBlank() || ssid == WifiManagerUnknownSsid) return
+        if (ssid == resolvedSsid) return
+        resolvedSsid = ssid
+        this@DashWifiManager.network = network
+        Log.i(TAG, "Resolved dash SSID: '$ssid'")
+        onSsidResolved?.invoke(ssid)
+        _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = ssid)
+    }
+
+    private fun handleUnavailable() {
+        this@DashWifiManager.network = null
+        if (everConnected && wantConnected) {
+            Log.w(TAG, "WiFi unavailable mid-session — dash AP missing, retrying in ${RECONNECT_DELAY}ms")
+            _state.value = WifiState(
+                status = WifiConnStatus.REQUESTING,
+                ssid   = pendingSsid,
+                error  = "Dash WiFi lost — reconnecting…",
+            )
+            scheduleReconnect()
+            return
+        }
+        Log.w(TAG, "WiFi unavailable — SSID not found or user declined")
+        _state.value = WifiState(
+            status = WifiConnStatus.ERROR,
+            ssid   = pendingSsid,
+            error  = "Could not connect to '$pendingSsid' — make sure the bike ignition is ON",
+        )
+        wantConnected = false
+    }
+
+    private fun handleLost(network: Network) {
+        Log.w(TAG, "WiFi link lost — reconnecting in ${RECONNECT_DELAY}ms")
+        this@DashWifiManager.network = null
+        _state.value = WifiState(
+            status = WifiConnStatus.REQUESTING,
+            ssid   = pendingSsid,
+            error  = "Link lost — reconnecting…",
+        )
+        if (wantConnected) scheduleReconnect()
+    }
+
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
@@ -241,9 +276,11 @@ class DashWifiManager(
 
     /** Read the connected network's SSID (strips the surrounding quotes Android adds). */
     private fun resolveSsid(network: Network): String {
-        val caps = cm.getNetworkCapabilities(network) ?: return ""
-        val info = caps.transportInfo as? WifiInfo ?: return ""
-        return info.ssid.orEmpty().trim('"').let { if (it == WifiManagerUnknownSsid) "" else it }
+        val caps = cm.getNetworkCapabilities(network)
+        val info = caps?.transportInfo as? WifiInfo
+        val fromCaps = info?.ssid.orEmpty().trim('"').let { if (it == WifiManagerUnknownSsid) "" else it }
+        if (fromCaps.isNotBlank()) return fromCaps
+        return findDashSsid(DashConfig.DEFAULT_PREFIX).orEmpty()
     }
 
     private fun release() {

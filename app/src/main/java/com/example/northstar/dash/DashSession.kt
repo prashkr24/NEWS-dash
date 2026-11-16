@@ -131,6 +131,22 @@ class DashSession(private val scope: CoroutineScope) {
         sessionJob = scope.launch(Dispatchers.IO) { runSession(ssid, network) }
     }
 
+    /** Update SSID mid-handshake if capabilities resolved the real SSID after onAvailable. */
+    fun updateSsid(newSsid: String) {
+        if (newSsid.isBlank() || newSsid.endsWith("_")) return
+        val a = auth ?: return
+        if (a.ssid != newSsid) {
+            Log.i(TAG, "Updating auth SSID '${a.ssid}' → '$newSsid'")
+            a.ssid = newSsid
+            if (_state.value == DashState.AUTHENTICATING && !authConfirmed) {
+                a.reset()
+                scope.launch(Dispatchers.IO) {
+                    runCatching { socket?.send(DashCommands.authRequest()) }
+                }
+            }
+        }
+    }
+
     fun startStreaming() {
         if (_state.value != DashState.READY) return
         _state.value = DashState.STREAMING
@@ -174,11 +190,19 @@ class DashSession(private val scope: CoroutineScope) {
     private suspend fun runSession(ssid: String, network: android.net.Network? = null) {
         try {
             _state.value = DashState.CONNECTING
+            // Ensure any previous socket is closed before binding :2000/:2002
+            socket?.close(); socket = null
             val sock = try {
                 DashSocket(network).also { socket = it }
-            } catch (e: java.net.BindException) {
-                fail("Port ${DashSocket.RX_PORT}/${DashSocket.CTRL_PORT} in use (${e.message})")
-                return
+            } catch (_: java.net.BindException) {
+                // Brief retry if OS is still releasing UDP port from prior attempt
+                delay(350)
+                try {
+                    DashSocket(network).also { socket = it }
+                } catch (e2: java.net.BindException) {
+                    fail("Port ${DashSocket.RX_PORT}/${DashSocket.CTRL_PORT} in use (${e2.message})")
+                    return
+                }
             }
 
             auth = DashAuth(ssid)
@@ -201,11 +225,25 @@ class DashSession(private val scope: CoroutineScope) {
             com.example.northstar.data.RideDiagnostics.log("auth", "initial burst sent — waiting up to ${AUTH_TIMEOUT}ms for 07 01 01")
 
             Log.i(TAG, "Waiting up to ${AUTH_TIMEOUT}ms for auth (07 01 01)…")
-            val deadline = System.currentTimeMillis() + AUTH_TIMEOUT
-            while (!authConfirmed && System.currentTimeMillis() < deadline) delay(100)
+            val startWait = System.currentTimeMillis()
+            val deadline = startWait + AUTH_TIMEOUT
+            var lastReburst = startWait
+            while (!authConfirmed && System.currentTimeMillis() < deadline) {
+                delay(100)
+                val now = System.currentTimeMillis()
+                // If the initial UDP broadcast was dropped while Wi-Fi ARP/interface was warming up,
+                // re-send authRequest + hostnameAnnounce every 2.5s until pubkey arrives.
+                if (!authConfirmed && auth?.hasPubKey != true && now - lastReburst >= 2_500L) {
+                    lastReburst = now
+                    Log.i(TAG, "No pubkey yet — re-sending auth burst")
+                    sock.send(DashCommands.authRequest())
+                    delay(BURST_PAUSE)
+                    sock.send(DashCommands.hostnameAnnounce(HOSTNAME))
+                }
+            }
 
             if (!authConfirmed) {
-                fail("Auth timed out — no 07 01 01 from dash. Check SSID matches '$ssid'.")
+                fail("Auth timed out — no 07 01 01 from dash. Check SSID matches '${auth?.ssid ?: ssid}'.")
                 return
             }
             Log.i(TAG, "Authenticated ✓")
@@ -216,6 +254,8 @@ class DashSession(private val scope: CoroutineScope) {
             Log.i(TAG, "READY ✓")
             com.example.northstar.data.RideDiagnostics.log("session", "nav-mode kick sent — READY (waiting for video pipeline)")
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Session error", e)
             fail("${e.javaClass.simpleName}: ${e.message}")

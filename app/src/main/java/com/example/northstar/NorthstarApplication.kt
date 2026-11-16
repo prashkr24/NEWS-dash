@@ -33,6 +33,8 @@ class NorthstarApplication : Application() {
         // persists — which silently breaks now-playing + call mirroring. Ask the system to rebind it
         // on every launch so an over-the-top install self-heals without the user re-toggling access.
         rebindNotificationListener()
+        // Arm Wireless Android-Auto style background auto-connect watcher + WifiNetworkSuggestion.
+        com.example.northstar.dash.FastReconnectManager.sync(this)
     }
 
     private fun rebindNotificationListener() {

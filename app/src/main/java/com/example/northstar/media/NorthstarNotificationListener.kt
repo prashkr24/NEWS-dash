@@ -45,6 +45,13 @@ class NorthstarNotificationListener : NotificationListenerService() {
     // NorthstarApplication should have re-bound it).
     override fun onListenerConnected() {
         com.example.northstar.data.RideDiagnostics.log("media", "notification listener CONNECTED")
+        // NotificationListenerService is kept alive by Android OS 24/7 — arm the zero-battery
+        // passive Wi-Fi scan watcher here so the bike's RE_* hotspot is detected even if
+        // the rider never opened the app after rebooting their phone.
+        runCatching {
+            com.example.northstar.dash.FastReconnectManager.sync(applicationContext)
+            com.example.northstar.dash.FastReconnectManager.checkScanAndAutoConnect(applicationContext)
+        }
     }
 
     override fun onListenerDisconnected() {

@@ -103,7 +103,7 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
 
     // Local preview state (mirrors what the dash shows)
     var pan by remember { mutableStateOf(Offset.Zero) }
-    var adjustMode by remember { mutableStateOf(true) }
+    var adjustMode by remember { mutableStateOf(false) }
     var joystickVelocity by remember { mutableStateOf(Offset.Zero) }
 
     // Physical joystick button → preview-only nudge (real map pan happens in the ViewModel)
@@ -278,7 +278,11 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
                     } else {
                         NorthstarBtn(
                             "Cancel",
-                            onClick = { userDisconnected = true; vm.disconnect() },
+                            onClick = {
+                                userDisconnected = true
+                                com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
+                                vm.disconnect()
+                            },
                             variant = BtnVariant.Ghost,
                             size = BtnSize.Sm,
                         )
@@ -386,12 +390,16 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
         }
 
         // Live info strip — real remaining distance, ETA, zoom
+        val useKm = remember { com.example.northstar.data.DashPrefs.unitsKm(context) }
+        val remVal = ui.remainingKm?.let { km ->
+            val v = if (useKm) km else km * 0.621371
+            if (v >= 10) "%.0f".format(v) else "%.1f".format(v)
+        } ?: "—"
+        val remUnit = if (ui.remainingKm != null) (if (useKm) "km" else "mi") else ""
+
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf(
-                Triple(
-                    ui.remainingKm?.let { if (it >= 10) "%.0f".format(it) else "%.1f".format(it) } ?: "—",
-                    if (ui.remainingKm != null) "km" else "", "Remaining",
-                ),
+                Triple(remVal, remUnit, "Remaining"),
                 Triple(ui.etaMinutes?.toString() ?: "—", if (ui.etaMinutes != null) "min" else "", "ETA"),
                 Triple("z${ui.mapZoom}", "", "Zoom"),
             ).forEach { (v, u, k) ->
@@ -417,30 +425,6 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
         }
 
         Spacer(Modifier.height(16.dp))
-
-        // Map adjust mode toggle
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(if (adjustMode) GoldTint else Surf1)
-                .border(1.dp, if (adjustMode) GoldTint2 else Line, RoundedCornerShape(14.dp))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(NorthstarIcons.Cross, null, tint = if (adjustMode) Gold else TextMid, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(11.dp))
-                Column {
-                    Text("Map adjust mode", color = TextHi, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
-                    Text("Mirrors the bike joystick", color = TextLo, fontSize = 11.5.sp, modifier = Modifier.padding(top = 1.dp))
-                }
-            }
-            NorthstarToggle(on = adjustMode, onChange = { adjustMode = it })
-        }
-
-        Spacer(Modifier.height(10.dp))
 
         // Heading-up toggle (rotate map to travel direction)
         Row(
@@ -488,23 +472,47 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
             NorthstarToggle(on = ui.tiltedView, onChange = { vm.toggleTiltedView() })
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(10.dp))
 
-        // Pan pad (full width) — drives the actual dash map in adjust mode
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
+        // Map adjust mode toggle (collapses virtual pan joystick unless needed)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(28.dp))
-                .background(Surf1)
-                .padding(vertical = 16.dp, horizontal = 12.dp),
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (adjustMode) GoldTint else Surf1)
+                .border(1.dp, if (adjustMode) GoldTint2 else Line, RoundedCornerShape(14.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            Joystick(
-                size = 128.dp,
-                onMove = { v -> joystickVelocity = if (adjustMode) v else Offset.Zero },
-            )
-            Spacer(Modifier.height(9.dp))
-            Eyebrow("Pan")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(NorthstarIcons.Cross, null, tint = if (adjustMode) Gold else TextMid, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(11.dp))
+                Column {
+                    Text("On-screen pan joystick", color = TextHi, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
+                    Text("Expand virtual joystick to pan the dash map", color = TextLo, fontSize = 11.5.sp, modifier = Modifier.padding(top = 1.dp))
+                }
+            }
+            NorthstarToggle(on = adjustMode, onChange = { adjustMode = it })
+        }
+
+        if (adjustMode) {
+            Spacer(Modifier.height(12.dp))
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(Surf1)
+                    .padding(vertical = 16.dp, horizontal = 12.dp),
+            ) {
+                Joystick(
+                    size = 128.dp,
+                    onMove = { v -> joystickVelocity = if (adjustMode) v else Offset.Zero },
+                )
+                Spacer(Modifier.height(9.dp))
+                Eyebrow("Pan")
+            }
         }
 
         Spacer(Modifier.height(18.dp))
@@ -537,7 +545,11 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
                 NorthstarIcons.Power,
                 onClick = {
                     when {
-                        streaming -> { userDisconnected = true; vm.disconnect() }
+                        streaming -> {
+                            userDisconnected = true
+                            com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
+                            vm.disconnect()
+                        }
                         ui.needsWifiOn -> runCatching {
                             context.startActivity(
                                 android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI)

@@ -38,6 +38,25 @@
          per-app "install unknown apps" grant). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Wireless Android Auto style background auto-connect on boot/Wi-Fi suggestion -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- JioTag 2 / Find Hub BLE proximity radar & bike Bluetooth wake trigger -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Android 11+ package visibility for 1-tap JioTag 2 / Google Find Hub / JioThings launch -->
+    <queries>
+        <package android:name="com.google.android.apps.adm" />
+        <package android:name="com.jio.jiothings" />
+        <package android:name="com.jio.myjio" />
+    </queries>
+
     <!-- Backups disabled: app-private storage holds identity documents (insurance/RC with
          their numbers) and service invoices. allowBackup=true would funnel those into
          Google cloud auto-backup and adb backup. Cross-device continuity for the syncable
@@ -109,6 +128,18 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- Wireless Android Auto style background auto-connect receiver -->
+        <receiver
+            android:name=".dash.DashAutoConnectReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.net.wifi.action.WIFI_NETWORK_SUGGESTION_POST_CONNECTION" />
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Shares stored service invoices (image/PDF) with an external viewer. -->
         <provider

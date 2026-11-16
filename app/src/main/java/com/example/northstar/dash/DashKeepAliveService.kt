@@ -37,6 +37,7 @@ class DashKeepAliveService : Service() {
         private const val NOTIF_ID     = 4701
         const val ACTION_START = "com.example.northstar.DASH_START"
         const val ACTION_STOP  = "com.example.northstar.DASH_STOP"
+        const val ACTION_USER_DISCONNECT = "com.example.northstar.DASH_USER_DISCONNECT"
 
         fun start(context: Context) {
             val i = Intent(context, DashKeepAliveService::class.java).setAction(ACTION_START)
@@ -58,6 +59,12 @@ class DashKeepAliveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_USER_DISCONNECT -> {
+                com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
+                com.example.northstar.viewmodel.DashViewModel.getInstance(applicationContext).disconnect()
+                stopSelf()
+                return START_NOT_STICKY
+            }
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
             else        -> startForegroundLocks()
         }
@@ -68,16 +75,6 @@ class DashKeepAliveService : Service() {
 
     private fun startForegroundLocks() {
         createChannel()
-        // The LOCATION type is what lets GPS keep updating with the screen off —
-        // without it Android 14+ freezes location for backgrounded apps and the
-        // rider marker sticks at its first fix. BUT on Android 14+ starting an FGS
-        // with the LOCATION type while ACCESS_FINE/COARSE_LOCATION is NOT granted
-        // throws SecurityException and crashes the process. This service can be
-        // started from the "Start navigation" flow before the rider has ever granted
-        // location (the Dash screen is the only place that requests it), so only
-        // claim the LOCATION type when the permission is actually held. CONNECTED_DEVICE
-        // is satisfied by CHANGE_NETWORK_STATE (a normal, install-time permission), so
-        // it's always safe.
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
@@ -90,13 +87,7 @@ class DashKeepAliveService : Service() {
             acquireLocks()
             Log.i(TAG, "Foreground service up — wake+wifi locks held")
         } catch (e: Exception) {
-            // Never let a foreground-service start crash the app (e.g. the OS denying
-            // the type, or a background-start window restriction). The streaming
-            // pipeline lives in DashViewModel and can still run; we just lose the
-            // wake/wifi locks (screen-off resilience), which the rider can recover
-            // from the Dash screen once permissions are granted.
             Log.e(TAG, "Foreground service start failed — continuing without locks", e)
-            // Trace it: this is exactly the OEM/Android-14 FGS path that used to crash silently.
             com.example.northstar.util.Telemetry.recordNonFatal(e, "DashKeepAliveService.startForegroundLocks")
             stopSelf()
         }
@@ -117,9 +108,6 @@ class DashKeepAliveService : Service() {
             acquire()
         }
 
-        // HIGH_PERF keeps the link awake (prevents WiFi power-save from dropping the
-        // WifiNetworkSpecifier connection) at lower power than LOW_LATENCY. 4 fps /
-        // ~200 kbps doesn't need low-latency mode's extra power draw.
         @Suppress("DEPRECATION")
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         @Suppress("DEPRECATION")
@@ -161,17 +149,27 @@ class DashKeepAliveService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        val disconnectIntent = PendingIntent.getService(
+            this, 1,
+            Intent(this, DashKeepAliveService::class.java).setAction(ACTION_USER_DISCONNECT),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             Notification.Builder(this, CHANNEL_ID)
         else
             @Suppress("DEPRECATION") Notification.Builder(this)
 
+        val disconnectAction = Notification.Action.Builder(
+            null, "Disconnect", disconnectIntent
+        ).build()
+
         return builder
-            .setContentTitle("WayDash — streaming to dash")
-            .setContentText("Map is live on the Tripper. Screen can stay off.")
+            .setContentTitle("WayDash — connected to Tripper Dash")
+            .setContentText("Streaming live map · Phone screen can stay off")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(open)
+            .addAction(disconnectAction)
             .build()
     }
 }

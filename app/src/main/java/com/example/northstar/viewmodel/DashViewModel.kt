@@ -124,6 +124,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     private var userWantsConnection = false
     private var authAttempts = 0       // bounded auto-retry of the (flaky) auth handshake
+    @Volatile private var everStreamed = false
 
     // ── Navigation/map state read by the 4 fps frame loop ──
     @Volatile private var destLat: Double? = null
@@ -268,6 +269,12 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // the phone's player, NOT map zoom. Map zoom stays on the direct map-mode codes above.
         private const val BTN_MEDIA_NEXT = 0x09   // media-mode RIGHT → next track
         private const val BTN_MEDIA_PREV = 0x0A   // media-mode LEFT  → previous track
+
+        @Volatile private var instance: DashViewModel? = null
+        fun getInstance(context: android.content.Context): DashViewModel =
+            instance ?: synchronized(this) {
+                instance ?: DashViewModel(context.applicationContext as Application).also { instance = it }
+            }
     }
 
     /** Project a lat/lng forward [distM] metres along [bearingDeg] (great-circle). */
@@ -299,6 +306,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         speedMps * elapsedSec.coerceIn(0.0, MAX_PREDICT_S)
 
     init {
+        if (instance == null) instance = this
         // Reflect the rider's stored dash WiFi config (SSID may be blank until discovered).
         _ui.update { it.copy(ssid = dashConfig.ssid, wifiPassword = dashConfig.password) }
 
@@ -306,7 +314,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // SSID so subsequent connects target it directly (no system picker again).
         wifiManager.onSsidResolved = { learned ->
             dashConfig.ssid = learned
+            session.updateSsid(learned)
             _ui.update { it.copy(ssid = learned) }
+            com.example.northstar.dash.FastReconnectManager.sync(getApplication())
         }
 
         viewModelScope.launch {
@@ -333,6 +343,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                     WifiConnStatus.ERROR -> {
                         // Dash is gone for good (bike powered off / out of range) → the ride is
                         // over. Save it even though the user never tapped Disconnect.
+                        saveParkedBikeIfStreamed("Auto-pinned when bike powered off")
                         stopRecording()
                         // …and release everything connect() acquired (wake/wifi locks, GPS,
                         // encoder loop). These used to leak when a connection ENDED on failure
@@ -360,6 +371,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                 when (state) {
                     DashState.READY -> { authAttempts = 0; _ui.update { it.copy(retryAttempt = 0) }; startStream() }
                     DashState.STREAMING -> {
+                        everStreamed = true
                         authAttempts = 0; _ui.update { it.copy(retryAttempt = 0, errorMessage = null) }
                         // Usage: the dash actually started showing the map — the core feature working.
                         com.example.northstar.util.Telemetry.logEvent("dash_streaming")
@@ -442,9 +454,38 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Connection ─────────────────────────────────────────────────────────
 
+    /**
+     * Headless auto-connect entry point called by [com.example.northstar.dash.FastReconnectManager]
+     * or [com.example.northstar.dash.DashAutoConnectReceiver] when the bike's RE_* Wi-Fi hotspot
+     * appears in range (Wireless Android Auto style).
+     */
+    fun autoConnectFromBackground() {
+        val app = getApplication<Application>()
+        if (!com.example.northstar.data.DashPrefs.wirelessAutoConnect(app)) return
+        val stage = _ui.value.stage
+        if (userWantsConnection || stage == ConnStage.STREAMING || stage == ConnStage.AUTH || stage == ConnStage.WIFI) return
+        if (!wifiManager.isWifiEnabled()) return
+        val hasLocPerm = androidx.core.content.ContextCompat.checkSelfPermission(
+            app, android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasLocPerm) return
+        android.util.Log.i("DashViewModel", "autoConnectFromBackground → starting headless dash connection")
+        connect()
+    }
+
+    private fun saveParkedBikeIfStreamed(note: String = "Auto-pinned on Dash disconnect") {
+        if (!everStreamed) return
+        everStreamed = false
+        val loc = location.lastKnown() ?: return
+        if (loc.latitude == 0.0 && loc.longitude == 0.0) return
+        com.example.northstar.data.BikeTrackerManager.get(getApplication())
+            .recordParking(loc.latitude, loc.longitude, note)
+    }
+
     fun connect() {
         userWantsConnection = true
         authAttempts = 0
+        everStreamed = false
         _ui.update { it.copy(errorMessage = null, retryAttempt = 0, needsWifiOn = false) }
 
         // The dash link needs the Wi‑Fi radio on (WifiNetworkSpecifier joins it as a separate
@@ -480,6 +521,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             wifiManager.findDashSsid(dashConfig.ssidPrefix)?.let { found ->
                 dashConfig.ssid = found
                 _ui.update { it.copy(ssid = found) }
+                com.example.northstar.dash.FastReconnectManager.sync(getApplication())
             }
         }
 
@@ -500,6 +542,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         userWantsConnection = false
         cancelReconnectGiveup()
         com.example.northstar.data.RideDiagnostics.log("connect", "user disconnect")
+        saveParkedBikeIfStreamed("Auto-pinned on Dash disconnect")
         stopRecording()        // a connect→disconnect session = one saved ride
         session.disconnect()
         wifiManager.disconnect()
@@ -533,6 +576,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     private fun giveUp(reason: String) {
         cancelReconnectGiveup()
         userWantsConnection = false
+        saveParkedBikeIfStreamed("Auto-pinned when Dash went out of range")
+        stopRecording()
         session.disconnect()
         wifiManager.disconnect()       // stops the indefinite AP reconnect loop
         releaseBackgroundResources()
@@ -600,10 +645,22 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ── Dash WiFi config (Settings) ──────────────────────────────────────────
-    fun setSsid(s: String) { dashConfig.ssid = s.trim(); _ui.update { it.copy(ssid = s.trim()) } }
-    fun setWifiPassword(p: String) { dashConfig.password = p; _ui.update { it.copy(wifiPassword = p) } }
+    fun setSsid(s: String) {
+        dashConfig.ssid = s.trim()
+        _ui.update { it.copy(ssid = s.trim()) }
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+    }
+    fun setWifiPassword(p: String) {
+        dashConfig.password = p
+        _ui.update { it.copy(wifiPassword = p) }
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+    }
     /** Forget the paired dash so the next connect rediscovers any RE_* dash by prefix. */
-    fun forgetDash() { dashConfig.forgetDash(); _ui.update { it.copy(ssid = "") } }
+    fun forgetDash() {
+        dashConfig.forgetDash()
+        _ui.update { it.copy(ssid = "") }
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+    }
 
     // ── Destination + routing ───────────────────────────────────────────────
 
@@ -659,17 +716,33 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Compute the road route now (while internet is reachable) and cache it. */
     private fun fetchRoute(destLatV: Double, destLngV: Double) {
-        val loc = location.lastKnown()
-        if (loc == null) {
-            android.util.Log.w("DashViewModel", "fetchRoute: no origin location yet")
-            return
-        }
         viewModelScope.launch {
-            // Prefer the alternative the rider picked on the Route screen, if it matches
-            // this destination; otherwise fetch fresh.
-            val r = com.example.northstar.dash.nav.RoutePlanHolder.takeIfMatches(destLatV, destLngV)
-                ?: com.example.northstar.dash.nav.RoutingHub.route(
-                    getApplication(), GeoPoint(loc.latitude, loc.longitude), GeoPoint(destLatV, destLngV))
+            // Prefer the alternative the rider picked on the Route/Explore screen, if it matches
+            // this destination; otherwise fetch fresh from current GPS.
+            val precomputed = com.example.northstar.dash.nav.RoutePlanHolder.takeIfMatches(destLatV, destLngV)
+            val r = if (precomputed != null) {
+                precomputed
+            } else {
+                var loc = location.lastKnown()
+                if (loc == null) {
+                    // Wait up to 4s for the first live GPS fix if location just started.
+                    repeat(8) {
+                        if (loc == null) {
+                            delay(500)
+                            loc = location.lastKnown()
+                        }
+                    }
+                }
+                val origin = loc
+                if (origin == null) {
+                    android.util.Log.w("DashViewModel", "fetchRoute: no origin location yet")
+                    null
+                } else {
+                    com.example.northstar.dash.nav.RoutingHub.route(
+                        getApplication(), GeoPoint(origin.latitude, origin.longitude), GeoPoint(destLatV, destLngV)
+                    )
+                }
+            }
             if (r != null) {
                 route = r
                 tiles.prefetchRoute(r.geometry)
@@ -966,7 +1039,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             riderBearing = heading,
             remainingKm = remainingM?.let { d -> d / 1000.0 },
             etaMinutes = if (etaSec != null) displayedEtaMin else null,
-            maneuver = null,
+            maneuver = if (r != null) lastNextManeuver?.let { m -> "${m.instruction} · ${fmtDist(lastNextTurnM)}" } else null,
             offRoute = offRoute,
             recalculating = recalculating,
         ) }
@@ -1434,6 +1507,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        if (this === instance && userWantsConnection) {
+            // Keep headless background session alive when Activity is recreated/closed.
+            return
+        }
+        saveParkedBikeIfStreamed("Auto-pinned on app close")
         stopRecording()        // save the in-progress ride if the app is closed mid-session
         session.disconnect()
         wifiManager.disconnect()

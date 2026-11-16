@@ -37,6 +37,9 @@ fun SettingsScreen(
     authViewModel: AuthViewModel,
     onSignedOut: () -> Unit,
     onBack: () -> Unit,
+    uiVersion: Int = 2,
+    onUiVersionChange: (Int) -> Unit = {},
+    onOpenDiscovery: () -> Unit = {},
 ) {
     val auth by authViewModel.state.collectAsState()
     val email = auth.email ?: "Not signed in"
@@ -45,13 +48,17 @@ fun SettingsScreen(
         src.split(" ", ".", "@").filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "?" }
     }
 
-    var screenOff   by remember { mutableStateOf(true) }
-    var keepAwake   by remember { mutableStateOf(true) }
-    var units       by remember { mutableStateOf("Kilometres") }
-
-    // Real voice setting, shared with RouteScreen via the VoiceManager singleton.
     val ctx = LocalContext.current
+    val dashVm = remember { com.example.northstar.viewmodel.DashViewModel.getInstance(ctx) }
+    val dashUi by dashVm.ui.collectAsState()
+
     var autoConnect by remember { mutableStateOf(com.example.northstar.data.DashPrefs.autoConnect(ctx)) }
+    var wirelessAuto by remember { mutableStateOf(com.example.northstar.data.DashPrefs.wirelessAutoConnect(ctx)) }
+    var unitsKm by remember { mutableStateOf(com.example.northstar.data.DashPrefs.unitsKm(ctx)) }
+    var showWifiConfigModal by remember { mutableStateOf(false) }
+    var ssidInput by remember(dashUi.ssid) { mutableStateOf(dashUi.ssid) }
+    var passInput by remember(dashUi.wifiPassword) { mutableStateOf(dashUi.wifiPassword) }
+
     val voiceManager = remember { com.example.northstar.dash.nav.VoiceManager.get(ctx) }
     val voiceMode by voiceManager.mode.collectAsState()
     val voice = when (voiceMode) {
@@ -67,8 +74,11 @@ fun SettingsScreen(
             .padding(18.dp)
             .padding(bottom = 110.dp),
     ) {
-        ScreenHeader(title = "Settings", onBack = onBack,
-            hint = "Connection, screen-off streaming, voice guidance, units, and media/call permissions.")
+        ScreenHeader(
+            title = "Settings",
+            onBack = onBack,
+            hint = "Wireless auto-connect, dash map, voice guidance, media/call controls, and v2/v1 layout mode.",
+        )
 
         // Account card
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 16.dp, onClick = {}) {
@@ -87,36 +97,101 @@ fun SettingsScreen(
                     auth.displayName?.takeIf { it.isNotBlank() }?.let {
                         Text(it, color = TextHi, fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold, fontFamily = GeistFamily)
                     }
-                    Text(email, color = if (auth.displayName.isNullOrBlank()) TextHi else TextMid, fontSize = if (auth.displayName.isNullOrBlank()) 15.5.sp else 12.5.sp, fontWeight = if (auth.displayName.isNullOrBlank()) FontWeight.SemiBold else FontWeight.Normal, fontFamily = GeistFamily, modifier = Modifier.padding(top = 2.dp))
+                    Text(
+                        email,
+                        color = if (auth.displayName.isNullOrBlank()) TextHi else TextMid,
+                        fontSize = if (auth.displayName.isNullOrBlank()) 15.5.sp else 12.5.sp,
+                        fontWeight = if (auth.displayName.isNullOrBlank()) FontWeight.SemiBold else FontWeight.Normal,
+                        fontFamily = GeistFamily,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
                 }
             }
         }
 
-        SectionLabel("Connection")
-        NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
-            SettingRow(NorthstarIcons.Bt, "Tripper Dash",
-                sub = when (conn) { ConnectionState.Connected -> "Connected"; ConnectionState.Searching -> "Connecting…"; ConnectionState.Offline -> "Not connected" },
-                control = { NorthstarChip(if (conn == ConnectionState.Connected) "Linked" else "Off", if (conn == ConnectionState.Connected) ChipTone.Gold else ChipTone.Off, dot = true) })
-            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
-            SettingRow(NorthstarIcons.Sync, "Auto-connect on start", "Keeps trying to link while open — no Connect tap",
-                control = { NorthstarToggle(autoConnect) { autoConnect = it; com.example.northstar.data.DashPrefs.setAutoConnect(ctx, it) } })
-            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
-            SettingRow(NorthstarIcons.Zap, "Stream quality", "Balanced · saves battery",
-                control = { Icon(NorthstarIcons.ChevronRight, null, tint = TextLo, modifier = Modifier.size(18.dp)) }, last = true)
+        SectionLabel("App experience (v2 / Classic v1)")
+        NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 14.dp) {
+            NorthstarSegmented(
+                options = listOf("WayDash v2", "Classic v1"),
+                value = if (uiVersion == 1) "Classic v1" else "WayDash v2",
+                onChange = { picked ->
+                    val v = if (picked == "Classic v1") 1 else 2
+                    com.example.northstar.data.DashPrefs.setUiVersion(ctx, v)
+                    onUiVersionChange(v)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                if (uiVersion == 2) "v2 includes built-in place/POI search, JioTag 2 Bike Hub, and streamlined 4-tab navigation."
+                else "Classic v1 restores the original 5-tab layout (Home, Route, Dash, Signals, Rides).",
+                color = TextLo,
+                fontSize = 11.5.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
 
-        SectionLabel("During a ride")
+        SectionLabel("Wireless Auto-Connect & Dash Link")
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
-            SettingRow(NorthstarIcons.Power, "Turn phone screen off", "Map keeps streaming to the dash",
-                control = { NorthstarToggle(screenOff) { screenOff = it } })
+            SettingRow(
+                NorthstarIcons.Wifi,
+                "Tripper Dash Status",
+                sub = when (conn) {
+                    ConnectionState.Connected -> "Streaming live to ${dashUi.ssid.ifBlank { "Tripper Dash" }}"
+                    ConnectionState.Searching -> "Connecting to ${dashUi.ssid.ifBlank { "RE_*" }}…"
+                    ConnectionState.Offline -> if (dashUi.ssid.isNotBlank()) "Paired with ${dashUi.ssid} · Standby" else "Auto-discovers any RE_* hotspot"
+                },
+                control = {
+                    NorthstarChip(
+                        if (conn == ConnectionState.Connected) "Linked" else "Standby",
+                        if (conn == ConnectionState.Connected) ChipTone.Gold else ChipTone.Off,
+                        dot = true,
+                    )
+                },
+            )
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
-            SettingRow(NorthstarIcons.Dash, "Keep dash awake", "Prevent Tripper sleep",
-                control = { NorthstarToggle(keepAwake) { keepAwake = it } }, last = true)
+            SettingRow(
+                NorthstarIcons.Zap,
+                "Wireless Auto-Connect (Background)",
+                "Android Auto style · joins RE_* & streams without opening the app",
+                control = {
+                    NorthstarToggle(wirelessAuto) {
+                        wirelessAuto = it
+                        com.example.northstar.data.DashPrefs.setWirelessAutoConnect(ctx, it)
+                        com.example.northstar.dash.FastReconnectManager.sync(ctx)
+                    }
+                },
+            )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            SettingRow(
+                NorthstarIcons.Sync,
+                "Auto-connect when app opens",
+                "Automatically links when Dash view is opened",
+                control = {
+                    NorthstarToggle(autoConnect) {
+                        autoConnect = it
+                        com.example.northstar.data.DashPrefs.setAutoConnect(ctx, it)
+                    }
+                },
+            )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            SettingRow(
+                NorthstarIcons.Gear,
+                "Dash Wi‑Fi SSID & Password",
+                if (dashUi.ssid.isNotBlank()) "Paired: ${dashUi.ssid} · Tap to edit or forget"
+                else "Auto-discovering RE_* prefix · Tap to configure",
+                control = {
+                    Icon(NorthstarIcons.ChevronRight, null, tint = TextLo, modifier = Modifier.size(18.dp))
+                },
+                last = true,
+                onClick = {
+                    ssidInput = dashUi.ssid
+                    passInput = dashUi.wifiPassword
+                    showWifiConfigModal = true
+                },
+            )
         }
 
         SectionLabel("Media & calls on dash")
-        // Re-check the grant on ON_RESUME so the chip flips to "On" the moment the user comes back
-        // from the system notification-access screen (the Settings value isn't observable on its own).
         val lifecycleOwner = LocalLifecycleOwner.current
         fun answerGranted() = androidx.core.content.ContextCompat.checkSelfPermission(
             ctx, android.Manifest.permission.ANSWER_PHONE_CALLS,
@@ -128,6 +203,8 @@ fun SettingsScreen(
                 if (e == Lifecycle.Event.ON_RESUME) {
                     mediaGranted = com.example.northstar.media.MediaInfoProvider.isAccessGranted(ctx)
                     callAnswerGranted = answerGranted()
+                    // Re-sync background Wi-Fi watcher once notification listener is granted
+                    com.example.northstar.dash.FastReconnectManager.sync(ctx)
                 }
             }
             lifecycleOwner.lifecycle.addObserver(obs)
@@ -139,9 +216,9 @@ fun SettingsScreen(
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
             SettingRow(
                 NorthstarIcons.Zap,
-                "Now playing & calls on dash",
-                if (mediaGranted) "Enabled · song info + caller shown while riding"
-                else "Tap to allow notification access",
+                "Now playing, calls & background wake",
+                if (mediaGranted) "Enabled · song info, caller & 24/7 background auto-connect active"
+                else "Tap to allow notification access (also enables 24/7 background auto-link)",
                 control = {
                     NorthstarChip(
                         if (mediaGranted) "On" else "Enable",
@@ -204,23 +281,44 @@ fun SettingsScreen(
 
         SectionLabel("Units")
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 14.dp) {
-            NorthstarSegmented(listOf("Kilometres", "Miles"), units, { units = it }, Modifier.fillMaxWidth())
+            NorthstarSegmented(
+                listOf("Kilometres", "Miles"),
+                if (unitsKm) "Kilometres" else "Miles",
+                {
+                    unitsKm = (it == "Kilometres")
+                    com.example.northstar.data.DashPrefs.setUnitsKm(ctx, unitsKm)
+                },
+                Modifier.fillMaxWidth(),
+            )
         }
 
-        SectionLabel("Sync")
+        SectionLabel("Sync & Diagnostics")
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
             val (syncTitle, syncSub) = when {
                 !auth.syncAvailable -> "Local only" to "Add your own Firebase project to sync across devices"
                 auth.isSignedIn     -> "Synced" to (auth.email ?: "Signed in")
                 else                -> "Not signed in" to "Sign in to sync across devices · data stays local until then"
             }
-            SettingRow(NorthstarIcons.Sync, syncTitle, syncSub,
+            SettingRow(
+                NorthstarIcons.Sync, syncTitle, syncSub,
                 control = {
                     NorthstarChip(
                         if (auth.isSignedIn) "On" else "Off",
                         if (auth.isSignedIn) ChipTone.Gold else ChipTone.Off, dot = true,
                     )
-                }, last = true)
+                },
+            )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            SettingRow(
+                NorthstarIcons.Bt,
+                "Protocol & Joystick Signals",
+                "Inspect raw Tripper Dash UDP packets & joystick hex codes",
+                control = {
+                    Icon(NorthstarIcons.ChevronRight, null, tint = TextLo, modifier = Modifier.size(18.dp))
+                },
+                last = true,
+                onClick = onOpenDiscovery,
+            )
         }
 
         Spacer(Modifier.height(22.dp))
@@ -252,6 +350,94 @@ fun SettingsScreen(
                 "link is unofficial and exists solely for interoperability with hardware you own — use at your own risk.",
             color = TextDis, fontSize = 10.sp, fontFamily = GeistFamily,
             modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 8.dp, start = 8.dp, end = 8.dp),
+        )
+    }
+
+    if (showWifiConfigModal) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showWifiConfigModal = false },
+            containerColor = Surf1,
+            title = { Text("Tripper Dash Wi‑Fi", color = TextHi, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Leave SSID blank to auto-discover any Royal Enfield RE_* hotspot, or enter your exact SSID:",
+                        color = TextMid, fontSize = 12.5.sp,
+                    )
+                    Column {
+                        Text("SSID", color = TextLo, fontSize = 11.sp, fontFamily = GeistMonoFamily)
+                        Spacer(Modifier.height(4.dp))
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Surf2)
+                                .border(1.dp, Line2, RoundedCornerShape(10.dp))
+                                .padding(11.dp),
+                        ) {
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = ssidInput,
+                                onValueChange = { ssidInput = it },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = TextHi, fontSize = 14.sp, fontFamily = GeistMonoFamily),
+                                cursorBrush = androidx.compose.ui.graphics.SolidColor(BravaBright),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    Column {
+                        Text("PASSWORD (DEFAULT: 12345678)", color = TextLo, fontSize = 11.sp, fontFamily = GeistMonoFamily)
+                        Spacer(Modifier.height(4.dp))
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Surf2)
+                                .border(1.dp, Line2, RoundedCornerShape(10.dp))
+                                .padding(11.dp),
+                        ) {
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = passInput,
+                                onValueChange = { passInput = it },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = TextHi, fontSize = 14.sp, fontFamily = GeistMonoFamily),
+                                cursorBrush = androidx.compose.ui.graphics.SolidColor(BravaBright),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                    if (dashUi.ssid.isNotBlank()) {
+                        NorthstarBtn(
+                            "Forget Paired Dash (Rediscover RE_*)",
+                            onClick = {
+                                dashVm.forgetDash()
+                                ssidInput = ""
+                                showWifiConfigModal = false
+                            },
+                            variant = BtnVariant.Ghost,
+                            size = BtnSize.Sm,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                NorthstarBtn(
+                    "Save",
+                    onClick = {
+                        dashVm.setSsid(ssidInput)
+                        dashVm.setWifiPassword(passInput.ifBlank { "12345678" })
+                        showWifiConfigModal = false
+                    },
+                    variant = BtnVariant.Primary,
+                    size = BtnSize.Sm,
+                )
+            },
+            dismissButton = {
+                NorthstarBtn(
+                    "Cancel",
+                    onClick = { showWifiConfigModal = false },
+                    variant = BtnVariant.Ghost,
+                    size = BtnSize.Sm,
+                )
+            },
         )
     }
 }
