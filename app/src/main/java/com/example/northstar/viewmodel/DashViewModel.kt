@@ -125,6 +125,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     private var userWantsConnection = false
     private var authAttempts = 0       // bounded auto-retry of the (flaky) auth handshake
     @Volatile private var everStreamed = false
+    @Volatile private var isBackgroundAttempt = false
 
     // ── Navigation/map state read by the 4 fps frame loop ──
     @Volatile private var destLat: Double? = null
@@ -219,6 +220,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // WiFi layer now retrying through an AP-missing window, this keeps trying long enough that a
         // power-cycle auto-rejoins with no manual step. Still bounded so a truly-gone dash frees power.
         private const val RECONNECT_GIVEUP_MS = 120_000L
+        // Shorter give-up window (25 s) when triggered headlessly from background so a brief pass near
+        // the bike never holds resources for 2 minutes if the session doesn't reach STREAMING.
+        private const val BG_RECONNECT_GIVEUP_MS = 25_000L
         // Alert the rider after this long of sustained (non-transient) link loss — long enough to skip
         // a brief blip that auto-recovers, short enough that they're not riding blind for minutes.
         private const val CONN_LOST_ALERT_MS = 12_000L
@@ -345,6 +349,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                         // over. Save it even though the user never tapped Disconnect.
                         saveParkedBikeIfStreamed("Auto-pinned when bike powered off")
                         stopRecording()
+                        com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
                         // …and release everything connect() acquired (wake/wifi locks, GPS,
                         // encoder loop). These used to leak when a connection ENDED on failure
                         // rather than via the Disconnect button, draining the battery in the
@@ -369,9 +374,18 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                 if (state == DashState.STREAMING) { cancelReconnectGiveup(); cancelConnLostAlert() }
                 else if (userWantsConnection) { armReconnectGiveup(); armConnLostAlert() }
                 when (state) {
-                    DashState.READY -> { authAttempts = 0; _ui.update { it.copy(retryAttempt = 0) }; startStream() }
+                    DashState.READY -> {
+                        authAttempts = 0
+                        _ui.update { it.copy(retryAttempt = 0) }
+                        // If we connected headlessly in the background, we deferred starting GPS
+                        // and RideRecorder to save battery until the Dash handshake actually succeeded.
+                        location.start()
+                        startRecording()
+                        startStream()
+                    }
                     DashState.STREAMING -> {
                         everStreamed = true
+                        isBackgroundAttempt = false   // promoted to full active ride session
                         authAttempts = 0; _ui.update { it.copy(retryAttempt = 0, errorMessage = null) }
                         // Usage: the dash actually started showing the map — the core feature working.
                         com.example.northstar.util.Telemetry.logEvent("dash_streaming")
@@ -470,7 +484,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasLocPerm) return
         android.util.Log.i("DashViewModel", "autoConnectFromBackground → starting headless dash connection")
-        connect()
+        connect(fromBackground = true)
     }
 
     private fun saveParkedBikeIfStreamed(note: String = "Auto-pinned on Dash disconnect") {
@@ -482,8 +496,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             .recordParking(loc.latitude, loc.longitude, note)
     }
 
-    fun connect() {
+    fun connect(fromBackground: Boolean = false) {
         userWantsConnection = true
+        isBackgroundAttempt = fromBackground
         authAttempts = 0
         everStreamed = false
         _ui.update { it.copy(errorMessage = null, retryAttempt = 0, needsWifiOn = false) }
@@ -499,7 +514,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         com.example.northstar.data.RideDiagnostics.init(getApplication())
-        com.example.northstar.data.RideDiagnostics.start("connect")
+        com.example.northstar.data.RideDiagnostics.start(if (fromBackground) "bg-connect" else "connect")
         // Stamp the running build's identity into the log so a pulled ride is matched 1:1 to the
         // pushed APK — never again analyse a ride and not know which build produced it.
         com.example.northstar.data.RideDiagnostics.log(
@@ -507,18 +522,23 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                 " vc=${com.example.northstar.BuildConfig.VERSION_CODE} name=${com.example.northstar.BuildConfig.VERSION_NAME}",
         )
         com.example.northstar.data.RideDiagnostics.log(
-            "connect", "ssid='${dashConfig.ssid}' needsDiscovery=${dashConfig.needsDiscovery} dest=${_ui.value.destinationName}",
+            "connect", "ssid='${dashConfig.ssid}' bg=$fromBackground needsDiscovery=${dashConfig.needsDiscovery} dest=${_ui.value.destinationName}",
         )
         loggedFirstFrame = false
         DashKeepAliveService.start(getApplication())
-        location.start()
-        startRecording()
+        // Battery optimization: when triggered headlessly from background, do NOT start high-frequency
+        // GPS or RideRecorder until the Dash auth handshake actually succeeds (DashState.READY).
+        if (!fromBackground) {
+            location.start()
+            startRecording()
+        }
+        armReconnectGiveup()
 
         // We must know the EXACT dash SSID before connecting — the dash validates it inside
         // the encrypted auth handshake (DashAuth), and Android redacts the SSID of a network
         // we've already joined. So if we don't have it stored, find it from a WiFi scan.
         if (dashConfig.needsDiscovery) {
-            wifiManager.findDashSsid(dashConfig.ssidPrefix)?.let { found ->
+            wifiManager.findDashSsid(dashConfig.ssidPrefix, triggerActiveScan = !fromBackground)?.let { found ->
                 dashConfig.ssid = found
                 _ui.update { it.copy(ssid = found) }
                 com.example.northstar.dash.FastReconnectManager.sync(getApplication())
@@ -530,17 +550,25 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                 session.connect(_ui.value.ssid, wifiManager.network)
             // Known SSID (stored or just found by scan) → exact connect + correct auth.
             dashConfig.ssid.isNotBlank() ->
-                wifiManager.connect(dashConfig.ssid, dashConfig.password)
+                wifiManager.connect(dashConfig.ssid, dashConfig.password, fromBackground = fromBackground)
             // Couldn't find it in scan results — fall back to prefix discovery so we at
             // least associate (auth may still need the SSID; a rescan usually fixes it).
             else ->
-                wifiManager.connect(dashConfig.ssidPrefix, dashConfig.password, prefixMatch = true)
+                wifiManager.connect(
+                    dashConfig.ssidPrefix,
+                    dashConfig.password,
+                    prefixMatch = true,
+                    fromBackground = fromBackground,
+                )
         }
     }
 
     fun disconnect() {
         userWantsConnection = false
+        isBackgroundAttempt = false
         cancelReconnectGiveup()
+        com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
+        com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
         com.example.northstar.data.RideDiagnostics.log("connect", "user disconnect")
         saveParkedBikeIfStreamed("Auto-pinned on Dash disconnect")
         stopRecording()        // a connect→disconnect session = one saved ride
@@ -576,6 +604,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     private fun giveUp(reason: String) {
         cancelReconnectGiveup()
         userWantsConnection = false
+        isBackgroundAttempt = false
+        com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
         saveParkedBikeIfStreamed("Auto-pinned when Dash went out of range")
         stopRecording()
         session.disconnect()
@@ -589,9 +619,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     /** Start the give-up countdown if it isn't already running (idempotent). */
     private fun armReconnectGiveup() {
         if (giveupJob?.isActive == true) return
+        val timeoutMs = if (isBackgroundAttempt) BG_RECONNECT_GIVEUP_MS else RECONNECT_GIVEUP_MS
         giveupJob = viewModelScope.launch {
-            delay(RECONNECT_GIVEUP_MS)
-            if (session.state.value != DashState.STREAMING) giveUp("reconnect window elapsed")
+            delay(timeoutMs)
+            if (session.state.value != DashState.STREAMING) giveUp("reconnect window elapsed (${timeoutMs / 1000}s)")
         }
     }
 

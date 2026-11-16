@@ -39,16 +39,24 @@ class DashKeepAliveService : Service() {
         const val ACTION_STOP  = "com.example.northstar.DASH_STOP"
         const val ACTION_USER_DISCONNECT = "com.example.northstar.DASH_USER_DISCONNECT"
 
+        @Volatile var isRunning = false
+            private set
+
         fun start(context: Context) {
             val i = Intent(context, DashKeepAliveService::class.java).setAction(ACTION_START)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i)
-            else context.startService(i)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i)
+                else context.startService(i)
+            }.onFailure { e ->
+                Log.w(TAG, "Could not start DashKeepAliveService from current context: ${e.message}")
+            }
         }
 
         fun stop(context: Context) {
-            context.startService(
-                Intent(context, DashKeepAliveService::class.java).setAction(ACTION_STOP)
-            )
+            if (!isRunning) return
+            runCatching {
+                context.stopService(Intent(context, DashKeepAliveService::class.java))
+            }
         }
     }
 
@@ -62,11 +70,16 @@ class DashKeepAliveService : Service() {
             ACTION_USER_DISCONNECT -> {
                 com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
                 com.example.northstar.viewmodel.DashViewModel.getInstance(applicationContext).disconnect()
+                isRunning = false
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
-            else        -> startForegroundLocks()
+            ACTION_STOP -> {
+                isRunning = false
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            else -> startForegroundLocks()
         }
         // START_STICKY: if the OS kills us under memory pressure, restart so the
         // ride keeps streaming.
@@ -75,18 +88,28 @@ class DashKeepAliveService : Service() {
 
     private fun startForegroundLocks() {
         createChannel()
+        val notif = buildNotification()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 if (hasLocationPermission()) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                else Log.w(TAG, "Location not granted — starting FGS without the LOCATION type")
-                startForeground(NOTIF_ID, buildNotification(), type)
+                try {
+                    startForeground(NOTIF_ID, notif, type)
+                } catch (sec: SecurityException) {
+                    // Android 14+ may reject FOREGROUND_SERVICE_TYPE_LOCATION when started from
+                    // a closed-app background receiver if the user only granted "While using the app".
+                    // Fall back to CONNECTED_DEVICE so the background connection still succeeds.
+                    Log.w(TAG, "FGS with LOCATION rejected from background (${sec.message}); falling back to CONNECTED_DEVICE")
+                    startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                }
             } else {
-                startForeground(NOTIF_ID, buildNotification())
+                startForeground(NOTIF_ID, notif)
             }
+            isRunning = true
             acquireLocks()
             Log.i(TAG, "Foreground service up — wake+wifi locks held")
         } catch (e: Exception) {
+            isRunning = false
             Log.e(TAG, "Foreground service start failed — continuing without locks", e)
             com.example.northstar.util.Telemetry.recordNonFatal(e, "DashKeepAliveService.startForegroundLocks")
             stopSelf()
@@ -102,16 +125,23 @@ class DashKeepAliveService : Service() {
     }
 
     private fun acquireLocks() {
+        releaseLocks()
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "northstar:dash").apply {
             setReferenceCounted(false)
-            acquire()
+            // Bounded 3-hour max lease per session so a lock can never leak forever
+            acquire(3 * 60 * 60 * 1000L)
         }
 
         @Suppress("DEPRECATION")
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        @Suppress("DEPRECATION")
-        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "northstar:dash").apply {
+        val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = wm.createWifiLock(lockMode, "northstar:dash").apply {
             setReferenceCounted(false)
             acquire()
         }
@@ -125,6 +155,7 @@ class DashKeepAliveService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         releaseLocks()
         Log.i(TAG, "Foreground service stopped — locks released")
         super.onDestroy()

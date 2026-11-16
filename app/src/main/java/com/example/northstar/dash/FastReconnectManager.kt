@@ -25,18 +25,38 @@ import java.util.concurrent.Executors
  */
 object FastReconnectManager {
     private const val TAG = "FastReconnectMgr"
-    private const val MANUAL_DISCONNECT_COOLDOWN_MS = 45_000L
+    // Cooldown after user explicitly taps Disconnect so the app doesn't immediately re-link
+    private const val MANUAL_DISCONNECT_COOLDOWN_MS = 120_000L
+    // Cooldown after a ride session ends or gives up so residual cached scans don't re-wake the app
+    private const val SESSION_END_COOLDOWN_MS = 45_000L
+    // Maximum age of a Wi-Fi ScanResult to be considered "live" (15 seconds in microseconds)
+    private const val MAX_SCAN_RESULT_AGE_US = 15_000_000L
+    // Minimum RSSI (dBm) to trigger auto-connect so weak ghost beacons don't wake the app
+    private const val MIN_SCAN_RSSI_DBM = -82
 
     @Volatile private var scanCallbackRegistered = false
     @Volatile private var lastManualDisconnectMs = 0L
+    @Volatile private var lastSessionEndMs = 0L
     @Volatile private var lastAutoTriggerMs = 0L
+    @Volatile private var lastTriggeredScanTimestampUs = 0L
+
+    private val scanExecutor by lazy {
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "waydash-passive-scan").apply { isDaemon = true }
+        }
+    }
 
     fun notifyManualDisconnect() {
         lastManualDisconnectMs = System.currentTimeMillis()
     }
 
+    fun notifySessionEnded() {
+        lastSessionEndMs = System.currentTimeMillis()
+    }
+
     fun clearManualDisconnectCooldown() {
         lastManualDisconnectMs = 0L
+        lastSessionEndMs = 0L
     }
 
     private fun wifi(context: Context): WifiManager =
@@ -59,7 +79,7 @@ object FastReconnectManager {
         val cfg = DashConfig.get(appCtx)
         val ssid = cfg.ssid
         if (ssid.isBlank()) {
-            return "Active · scanning for any ${cfg.ssidPrefix}* bike hotspot"
+            return "Active · passive watcher waiting for first ${cfg.ssidPrefix}* pairing"
         }
 
         return try {
@@ -71,7 +91,7 @@ object FastReconnectManager {
                 status == WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE
             ) {
                 Log.i(TAG, "WifiNetworkSuggestion active for '$ssid'")
-                "Active · auto-links to $ssid like Wireless Android Auto"
+                "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
             } else {
                 Log.w(TAG, "addNetworkSuggestions status=$status")
                 "Active · passive scan watcher enabled for $ssid"
@@ -92,7 +112,7 @@ object FastReconnectManager {
     }
 
     private fun buildSuggestions(ssid: String, password: String): List<WifiNetworkSuggestion> {
-        val interactive = WifiNetworkSuggestion.Builder()
+        val suggestion = WifiNetworkSuggestion.Builder()
             .setSsid(ssid)
             .setIsAppInteractionRequired(true)
             .apply {
@@ -102,13 +122,13 @@ object FastReconnectManager {
                 }
             }
             .build()
-        return listOf(interactive)
+        return listOf(suggestion)
     }
 
     /**
      * Registers a zero-battery passive listener on OS Wi-Fi scans (API 30+).
-     * Whenever the phone's Wi-Fi chip completes any background or foreground scan and sees
-     * the bike's `RE_*` hotspot, we trigger the Dash connection automatically.
+     * Does NOT trigger any Wi-Fi scans itself — only inspects results when Android OS
+     * performs its normal system scan.
      */
     @SuppressLint("MissingPermission")
     fun registerPassiveScanWatcher(context: Context) {
@@ -118,7 +138,7 @@ object FastReconnectManager {
         val w = wifi(appCtx)
         try {
             w.registerScanResultsCallback(
-                Executors.newSingleThreadExecutor(),
+                scanExecutor,
                 object : WifiManager.ScanResultsCallback() {
                     override fun onScanResultsAvailable() {
                         checkScanAndAutoConnect(appCtx)
@@ -126,7 +146,7 @@ object FastReconnectManager {
                 }
             )
             scanCallbackRegistered = true
-            Log.i(TAG, "Passive Wi-Fi scan watcher registered")
+            Log.i(TAG, "Passive Wi-Fi scan watcher registered (zero active polling)")
         } catch (e: Exception) {
             Log.w(TAG, "registerScanResultsCallback failed: ${e.message}")
         }
@@ -138,18 +158,37 @@ object FastReconnectManager {
         if (!DashPrefs.wirelessAutoConnect(appCtx)) return
         val now = System.currentTimeMillis()
         if (now - lastManualDisconnectMs < MANUAL_DISCONNECT_COOLDOWN_MS) return
-        if (now - lastAutoTriggerMs < 8_000L) return
+        if (now - lastSessionEndMs < SESSION_END_COOLDOWN_MS) return
+        if (now - lastAutoTriggerMs < 12_000L) return
 
         val cfg = DashConfig.get(appCtx)
         val w = wifi(appCtx)
         if (!w.isWifiEnabled) return
 
+        val nowElapsedUs = android.os.SystemClock.elapsedRealtime() * 1000L
+        var newestMatchTimestampUs = 0L
+
         val foundSsid = try {
-            val results = w.scanResults.mapNotNull { it.SSID?.trim('"')?.takeIf { s -> s.isNotBlank() } }
-            if (cfg.ssid.isNotBlank() && results.any { it == cfg.ssid }) {
-                cfg.ssid
+            // Filter strictly to FRESH scan results (< 15s old) with strong signal (>= -82 dBm).
+            // This prevents Android's cached scan list from re-triggering auto-connect after
+            // the rider has already turned the bike key OFF.
+            val freshResults = w.scanResults.filter { sr ->
+                val ageUs = nowElapsedUs - sr.timestamp
+                ageUs in 0..MAX_SCAN_RESULT_AGE_US &&
+                    sr.level >= MIN_SCAN_RSSI_DBM &&
+                    sr.timestamp > lastTriggeredScanTimestampUs
+            }
+            val matched = if (cfg.ssid.isNotBlank()) {
+                freshResults.firstOrNull { it.SSID?.trim('"') == cfg.ssid }
             } else {
-                results.firstOrNull { it.startsWith(cfg.ssidPrefix) }
+                freshResults.firstOrNull {
+                    val s = it.SSID?.trim('"').orEmpty()
+                    s.isNotBlank() && s.startsWith(cfg.ssidPrefix)
+                }
+            }
+            matched?.let {
+                newestMatchTimestampUs = it.timestamp
+                it.SSID?.trim('"')
             }
         } catch (_: Exception) {
             null
@@ -159,7 +198,8 @@ object FastReconnectManager {
         val stage = vm.ui.value.stage
         if (stage == ConnStage.OFFLINE || stage == ConnStage.ERROR) {
             lastAutoTriggerMs = now
-            Log.i(TAG, "Bike hotspot '$foundSsid' detected in range → triggering background auto-connect")
+            lastTriggeredScanTimestampUs = newestMatchTimestampUs
+            Log.i(TAG, "Fresh bike hotspot '$foundSsid' detected (<15s old) → triggering background auto-connect")
             if (cfg.ssid.isBlank()) cfg.ssid = foundSsid
             vm.autoConnectFromBackground()
         }
