@@ -62,7 +62,8 @@ fun V2ExploreScreen(
     val savedPlaces by routeViewModel.saved.collectAsState()
 
     val bikeTracker = remember { BikeTrackerManager.get(ctx) }
-    val parkedBike by bikeTracker.parkedLocation.collectAsState()
+    val bikeState by bikeTracker.state.collectAsState()
+    val parkedBike = bikeState.parked
 
     val essentialPermissions = remember {
         buildList {
@@ -282,7 +283,7 @@ fun V2ExploreScreen(
                             name = "Parked Guerrilla 450",
                             lat = parked.lat,
                             lng = parked.lng,
-                            subtitle = parked.address ?: "Last parked spot",
+                            subtitle = parked.address.ifBlank { "Last parked spot" },
                         )
                     },
                 )
@@ -555,7 +556,7 @@ fun V2ExploreScreen(
                     icon = NorthstarIcons.Navi,
                     variant = BtnVariant.Primary,
                     size = BtnSize.Lg,
-                    disabled = dest.lat == null || dest.lng == null,
+                    enabled = dest.lat != null && dest.lng != null,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -597,7 +598,7 @@ fun V2ExploreScreen(
                         }
                         Text(
                             parkedBike?.let { p ->
-                                "Parked: ${p.address ?: "%.4f, %.4f".format(p.lat, p.lng)}"
+                                "Parked: ${p.address.ifBlank { "%.4f, %.4f".format(p.lat, p.lng) }}"
                             } ?: "Auto-pins parking spot on Dash disconnect · Live BLE Tag Radar",
                             color = TextMid,
                             fontSize = 12.sp,

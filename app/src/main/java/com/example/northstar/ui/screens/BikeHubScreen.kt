@@ -54,8 +54,8 @@ fun BikeHubScreen(
         ) {
             NorthstarSegmented(
                 options = listOf("Tracker", "Rides", "Garage"),
-                value = selectedSection,
-                onChange = { selectedSection = it },
+                selected = selectedSection,
+                onSelect = { selectedSection = it },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -83,8 +83,8 @@ private fun BikeTrackerTab(
 ) {
     val ctx = LocalContext.current
     val tracker = remember { BikeTrackerManager.get(ctx) }
-    val parked by tracker.parkedLocation.collectAsState()
-    val radar by tracker.radar.collectAsState()
+    val trackerState by tracker.state.collectAsState()
+    val parked = trackerState.parked
 
     val blePermissions = remember {
         buildList {
@@ -104,12 +104,12 @@ private fun BikeTrackerTab(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { res ->
         if (blePermissions.all { res[it] == true }) {
-            tracker.startRadarScan()
+            tracker.startBleRadar()
         }
     }
 
     DisposableEffect(Unit) {
-        onDispose { tracker.stopRadarScan() }
+        onDispose { tracker.stopBleRadar() }
     }
 
     val riderOrigin = remember(parked) { routeViewModel.currentOrigin() }
@@ -140,7 +140,8 @@ private fun BikeTrackerTab(
                     Eyebrow("LAST PARKED LOCATION")
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        parked?.address ?: if (parked != null) "Pinned GPS Coordinates" else "No parking pin recorded yet",
+                        if (parked != null) parked.address.ifBlank { "Pinned GPS Coordinates" }
+                        else "No parking pin recorded yet",
                         color = TextHi,
                         fontSize = 16.5.sp,
                         fontWeight = FontWeight.Bold,
@@ -225,7 +226,7 @@ private fun BikeTrackerTab(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.clickable {
                                 editingNote = false
-                                parked?.let { p -> tracker.recordParking(p.lat, p.lng, noteInput) }
+                                tracker.updateParkingNote(noteInput)
                             },
                         )
                     } else {
@@ -237,7 +238,7 @@ private fun BikeTrackerTab(
                                 fontFamily = GeistMonoFamily,
                             )
                             Text(
-                                parked?.note?.ifBlank { "Add note (e.g. B2 Pillar 14)…" } ?: "",
+                                parked.note.ifBlank { "Add note (e.g. B2 Pillar 14)…" },
                                 color = TextMid,
                                 fontSize = 12.5.sp,
                             )
@@ -274,12 +275,11 @@ private fun BikeTrackerTab(
                     NorthstarBtn(
                         "Route to Bike",
                         onClick = {
-                            val p = parked ?: return@NorthstarBtn
                             routeViewModel.navigateToCoordinates(
                                 name = "Parked Guerrilla 450",
-                                lat = p.lat,
-                                lng = p.lng,
-                                subtitle = p.address ?: "Parked bike location",
+                                lat = parked.lat,
+                                lng = parked.lng,
+                                subtitle = parked.address.ifBlank { "Parked bike location" },
                             )
                             onNavigateToBike()
                         },
@@ -295,6 +295,10 @@ private fun BikeTrackerTab(
         Spacer(Modifier.height(16.dp))
 
         // ── 2. JioTag 2 Live BLE Proximity Radar Card ─────────────────────────
+        val scanning = trackerState.scanningBle
+        val liveTag = trackerState.liveTag
+        val rssi = liveTag?.rssi
+
         NorthstarCard(modifier = Modifier.fillMaxWidth()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -307,13 +311,13 @@ private fun BikeTrackerTab(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(if (radar.scanning) BravaTint else Surf2)
-                            .border(1.dp, if (radar.scanning) BravaBright else Line2, CircleShape),
+                            .background(if (scanning) BravaTint else Surf2)
+                            .border(1.dp, if (scanning) BravaBright else Line2, CircleShape),
                     ) {
                         Icon(
                             NorthstarIcons.Bt,
                             contentDescription = null,
-                            tint = if (radar.scanning) BravaBright else TextMid,
+                            tint = if (scanning) BravaBright else TextMid,
                             modifier = Modifier.size(21.dp),
                         )
                     }
@@ -327,7 +331,8 @@ private fun BikeTrackerTab(
                             fontFamily = GeistFamily,
                         )
                         Text(
-                            if (radar.pairedTagMac != null) "Paired Tag: ${radar.pairedTagName} (${radar.pairedTagMac})"
+                            if (trackerState.pairedTagMac.isNotBlank())
+                                "Paired Tag: ${trackerState.pairedTagName} (${trackerState.pairedTagMac})"
                             else "Scans Google Find Hub (0xFEAA) & JioTag 2 BLE beacons",
                             color = TextLo,
                             fontSize = 11.5.sp,
@@ -337,26 +342,24 @@ private fun BikeTrackerTab(
                 }
 
                 NorthstarBtn(
-                    if (radar.scanning) "Stop" else "Scan Radar",
+                    if (scanning) "Stop" else "Scan Radar",
                     onClick = {
-                        if (radar.scanning) {
-                            tracker.stopRadarScan()
+                        if (scanning) {
+                            tracker.stopBleRadar()
                         } else if (hasBlePerms()) {
-                            tracker.startRadarScan()
+                            tracker.startBleRadar()
                         } else {
                             permLauncher.launch(blePermissions)
                         }
                     },
                     icon = NorthstarIcons.Bt,
-                    variant = if (radar.scanning) BtnVariant.Ghost else BtnVariant.Primary,
+                    variant = if (scanning) BtnVariant.Ghost else BtnVariant.Primary,
                     size = BtnSize.Sm,
                 )
             }
 
             Spacer(Modifier.height(14.dp))
 
-            // Signal strength & estimated distance display
-            val rssi = radar.liveRssi
             val signalProgress = if (rssi != null) ((rssi + 100f) / 60f).coerceIn(0.05f, 1f) else 0f
 
             Column(
@@ -376,22 +379,24 @@ private fun BikeTrackerTab(
                         Eyebrow("PROXIMITY STATUS")
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            tracker.proximityLabel(rssi),
+                            liveTag?.proximityLabel ?: if (scanning) "Scanning for JioTag 2…" else "Radar idle",
                             color = if (rssi != null && rssi >= -72) OkGreen else TextHi,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
                         )
                     }
                     Column(horizontalAlignment = Alignment.End) {
+                        val estDistText = liveTag?.let { "~${"%.1f".format(it.estimatedMeters)} m" } ?: "—"
+                        val rssiText = rssi?.let { "$it dBm" } ?: "No signal"
                         Text(
-                            radar.estimatedMeters?.let { "~${"%.1f".format(it)} m" } ?: "—",
+                            estDistText,
                             color = BravaBright,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = GeistMonoFamily,
                         )
                         Text(
-                            rssi?.let { "$it dBm" } ?: "No signal",
+                            rssiText,
                             color = TextLo,
                             fontSize = 11.sp,
                             fontFamily = GeistMonoFamily,
@@ -408,12 +413,12 @@ private fun BikeTrackerTab(
             }
 
             // Nearby detected BLE trackers list so the user can lock onto their JioTag 2
-            if (radar.nearbyTrackers.isNotEmpty()) {
+            if (trackerState.nearbyCandidates.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
-                Eyebrow("DETECTED TRACKER BEACONS NEARBY (${radar.nearbyTrackers.size})")
+                Eyebrow("DETECTED TRACKER BEACONS NEARBY (${trackerState.nearbyCandidates.size})")
                 Spacer(Modifier.height(6.dp))
-                radar.nearbyTrackers.take(5).forEach { beacon ->
-                    val isPaired = beacon.mac == radar.pairedTagMac
+                trackerState.nearbyCandidates.take(5).forEach { beacon ->
+                    val isPaired = beacon.address == trackerState.pairedTagMac
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -423,7 +428,7 @@ private fun BikeTrackerTab(
                             .clip(RoundedCornerShape(11.dp))
                             .background(if (isPaired) BravaTint else Surf2)
                             .border(1.dp, if (isPaired) BravaBright else Line, RoundedCornerShape(11.dp))
-                            .clickable { tracker.pairTag(beacon.mac, beacon.name) }
+                            .clickable { tracker.pairBleTag(beacon.address, beacon.name) }
                             .padding(horizontal = 12.dp, vertical = 9.dp),
                     ) {
                         Column(Modifier.weight(1f)) {
@@ -434,12 +439,12 @@ private fun BikeTrackerTab(
                                     fontSize = 13.5.sp,
                                     fontWeight = FontWeight.SemiBold,
                                 )
-                                if (beacon.isFindMyNetwork) {
+                                if (beacon.isJioOrFindHub) {
                                     NorthstarChip("Find Hub / JioTag 2", ChipTone.Gold)
                                 }
                             }
                             Text(
-                                "${beacon.mac} · ${beacon.rssi} dBm (~${"%.1f".format(beacon.estimatedMeters)} m)",
+                                "${beacon.address} · ${beacon.rssi} dBm (~${"%.1f".format(beacon.estimatedMeters)} m)",
                                 color = TextLo,
                                 fontSize = 11.sp,
                                 fontFamily = GeistMonoFamily,
@@ -455,13 +460,13 @@ private fun BikeTrackerTab(
                 }
             }
 
-            if (radar.pairedTagMac != null) {
+            if (trackerState.pairedTagMac.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Unpair saved tag (${radar.pairedTagMac})",
+                    "Unpair saved tag (${trackerState.pairedTagMac})",
                     color = TextLo,
                     fontSize = 11.5.sp,
-                    modifier = Modifier.clickable { tracker.unpairTag() },
+                    modifier = Modifier.clickable { tracker.unpairBleTag() },
                 )
             }
         }

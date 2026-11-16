@@ -113,8 +113,8 @@ fun SettingsScreen(
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 14.dp) {
             NorthstarSegmented(
                 options = listOf("WayDash v2", "Classic v1"),
-                value = if (uiVersion == 1) "Classic v1" else "WayDash v2",
-                onChange = { picked ->
+                selected = if (uiVersion == 1) "Classic v1" else "WayDash v2",
+                onSelect = { picked ->
                     val v = if (picked == "Classic v1") 1 else 2
                     com.example.northstar.data.DashPrefs.setUiVersion(ctx, v)
                     onUiVersionChange(v)

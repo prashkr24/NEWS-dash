@@ -15,9 +15,9 @@ import java.net.URLEncoder
 import java.util.Locale
 
 data class SearchPlace(
-    val id: String,
+    val id: String = "",
     val name: String,
-    val subtitle: String,
+    val subtitle: String = "",
     val lat: Double,
     val lng: Double,
     val category: String = "",
@@ -56,12 +56,14 @@ object PlaceSearchEngine {
         QuickCategory("atm", "ATM", "ATM bank", "🏧"),
         QuickCategory("hospital", "Hospital", "hospital clinic", "🏥"),
     )
+    val quickCategories: List<QuickCategory> get() = QUICK_CATEGORIES
 
     suspend fun search(
         context: Context,
         query: String,
-        riderLat: Double?,
-        riderLng: Double?,
+        riderLat: Double? = null,
+        riderLng: Double? = null,
+        limit: Int = 8,
     ): List<SearchPlace> = withContext(Dispatchers.IO) {
         val q = query.trim()
         if (q.length < 2) return@withContext emptyList()
@@ -359,21 +361,25 @@ object PlaceSearchEngine {
 
     fun homePlace(context: Context): SearchPlace? =
         prefs(context).getString(KEY_HOME, null)?.let { runCatching { fromJson(JSONObject(it)) }.getOrNull() }
+    fun getHome(context: Context): SearchPlace? = homePlace(context)
 
     fun setHomePlace(context: Context, place: SearchPlace?) {
         prefs(context).edit().apply {
             if (place == null) remove(KEY_HOME) else putString(KEY_HOME, toJson(place).toString())
         }.apply()
     }
+    fun setHome(context: Context, place: SearchPlace?) = setHomePlace(context, place)
 
     fun workPlace(context: Context): SearchPlace? =
         prefs(context).getString(KEY_WORK, null)?.let { runCatching { fromJson(JSONObject(it)) }.getOrNull() }
+    fun getWork(context: Context): SearchPlace? = workPlace(context)
 
     fun setWorkPlace(context: Context, place: SearchPlace?) {
         prefs(context).edit().apply {
             if (place == null) remove(KEY_WORK) else putString(KEY_WORK, toJson(place).toString())
         }.apply()
     }
+    fun setWork(context: Context, place: SearchPlace?) = setWorkPlace(context, place)
 
     private fun toJson(p: SearchPlace): JSONObject = JSONObject().apply {
         put("id", p.id)
