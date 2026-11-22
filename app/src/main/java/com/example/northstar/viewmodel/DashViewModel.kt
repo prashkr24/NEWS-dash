@@ -333,15 +333,24 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 when (ws.status) {
                     WifiConnStatus.CONNECTED -> {
+                        val targetSsid = ws.ssid.takeIf { it.isNotBlank() && !it.endsWith("_") }
+                            ?: dashConfig.ssid.takeIf { it.isNotBlank() }
+                            ?: _ui.value.ssid
+                        if (targetSsid.isNotBlank() && targetSsid != _ui.value.ssid) {
+                            _ui.update { it.copy(ssid = targetSsid) }
+                        }
                         refreshStage()
                         if (userWantsConnection &&
                             session.state.value in listOf(DashState.IDLE, DashState.ERROR)
                         ) {
-                            delay(1_200)
+                            delay(if (isBackgroundAttempt) 600L else 1_000L)
                             // Re-check: the user may have hit Disconnect during the delay.
                             if (userWantsConnection &&
                                 wifiManager.state.value.status == WifiConnStatus.CONNECTED
-                            ) session.connect(_ui.value.ssid, wifiManager.network)
+                            ) {
+                                val finalSsid = _ui.value.ssid.ifBlank { dashConfig.ssid }
+                                session.connect(finalSsid, wifiManager.network)
+                            }
                         }
                     }
                     WifiConnStatus.ERROR -> {
@@ -400,8 +409,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                             authAttempts++
                             _ui.update { it.copy(retryAttempt = authAttempts, errorMessage = null) }
                             delay(1_500)
-                            if (userWantsConnection && wifiManager.state.value.status == WifiConnStatus.CONNECTED)
-                                session.connect(_ui.value.ssid, wifiManager.network)
+                            if (userWantsConnection && wifiManager.state.value.status == WifiConnStatus.CONNECTED) {
+                                val finalSsid = _ui.value.ssid.ifBlank { dashConfig.ssid }
+                                session.connect(finalSsid, wifiManager.network)
+                            }
                         } else {
                             _ui.update { it.copy(retryAttempt = 0) }
                             // Retries exhausted while the WiFi link is still up → give up fully now
@@ -471,7 +482,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Headless auto-connect entry point called by [com.example.northstar.dash.FastReconnectManager]
      * or [com.example.northstar.dash.DashAutoConnectReceiver] when the bike's RE_* Wi-Fi hotspot
-     * appears in range (Wireless Android Auto style).
+     * appears in range or connects automatically (Wireless Android Auto style).
      */
     fun autoConnectFromBackground() {
         val app = getApplication<Application>()
@@ -479,12 +490,19 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val stage = _ui.value.stage
         if (userWantsConnection || stage == ConnStage.STREAMING || stage == ConnStage.AUTH || stage == ConnStage.WIFI) return
         if (!wifiManager.isWifiEnabled()) return
-        val hasLocPerm = androidx.core.content.ContextCompat.checkSelfPermission(
+        val hasFineLoc = androidx.core.content.ContextCompat.checkSelfPermission(
             app, android.Manifest.permission.ACCESS_FINE_LOCATION
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (!hasLocPerm) return
+        val hasCoarseLoc = androidx.core.content.ContextCompat.checkSelfPermission(
+            app, android.Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasFineLoc && !hasCoarseLoc && dashConfig.ssid.isBlank()) return
         android.util.Log.i("DashViewModel", "autoConnectFromBackground → starting headless dash connection")
-        connect(fromBackground = true)
+        viewModelScope.launch {
+            if (!userWantsConnection) {
+                connect(fromBackground = true)
+            }
+        }
     }
 
     private fun saveParkedBikeIfStreamed(note: String = "Auto-pinned on Dash disconnect") {

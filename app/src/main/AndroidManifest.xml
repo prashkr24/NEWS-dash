@@ -14,6 +14,11 @@
         tools:targetApi="tiramisu" />
     <!-- Android 12 and below fallback -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Required on Android 10+ for closed-app Wireless Auto-Connect: allows Android OS to deliver
+         WIFI_NETWORK_SUGGESTION_POST_CONNECTION when the app is closed, read the RE_* SSID in the
+         background, and stream live GPS updates to the Dash without unlocking the phone. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <!-- Keep streaming to the dash with the screen off -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Haptic cue when the dash link drops mid-ride (paired with the BT voice alert). -->

@@ -50,6 +50,7 @@ class NorthstarNotificationListener : NotificationListenerService() {
         // the rider never opened the app after rebooting their phone.
         runCatching {
             com.example.northstar.dash.FastReconnectManager.sync(applicationContext)
+            com.example.northstar.dash.FastReconnectManager.checkActiveWifiAndAutoConnect(applicationContext)
             com.example.northstar.dash.FastReconnectManager.checkScanAndAutoConnect(applicationContext)
         }
     }

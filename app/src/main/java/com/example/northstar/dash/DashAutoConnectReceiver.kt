@@ -31,18 +31,17 @@ class DashAutoConnectReceiver : BroadcastReceiver() {
         when (action) {
             WifiManager.ACTION_WIFI_NETWORK_SUGGESTION_POST_CONNECTION -> {
                 Log.i(TAG, "OS auto-joined suggested bike Wi-Fi → starting Dash session in background")
+                FastReconnectManager.sync(appCtx)
                 DashViewModel.getInstance(appCtx).autoConnectFromBackground()
             }
             BluetoothDevice.ACTION_ACL_CONNECTED -> {
-                Log.d(TAG, "Bluetooth device connected → checking for bike Wi-Fi hotspot")
-                FastReconnectManager.registerPassiveScanWatcher(appCtx)
-                FastReconnectManager.checkScanAndAutoConnect(appCtx)
+                Log.d(TAG, "Bluetooth device connected → scheduling bike Wi-Fi checks (0s..14s)")
+                FastReconnectManager.schedulePostBluetoothChecks(appCtx)
             }
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
                 Log.i(TAG, "Boot/update ($action) → syncing Wireless Auto-Connect suggestions & watcher")
-                FastReconnectManager.sync(appCtx)
-                FastReconnectManager.checkScanAndAutoConnect(appCtx)
+                FastReconnectManager.schedulePostBluetoothChecks(appCtx)
             }
         }
     }

@@ -151,33 +151,15 @@ class DashWifiManager(
 
     /**
      * Checks if Android OS has ALREADY joined the bike's `RE_*` Wi-Fi network (for example,
-     * automatically in the background via [android.net.wifi.WifiNetworkSuggestion] while the
-     * app UI is completely closed).
+     * automatically in the background via [android.net.wifi.WifiNetworkSuggestion] or Saved Wi-Fi
+     * while the app UI is completely closed).
      */
     @SuppressLint("MissingPermission")
-    private fun findExistingDashNetwork(): Network? {
+    fun findExistingDashNetwork(): Network? {
         return try {
             for (net in cm.allNetworks) {
-                val caps = cm.getNetworkCapabilities(net) ?: continue
-                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
-                val info = caps.transportInfo as? WifiInfo
-                val ssid = info?.ssid.orEmpty().trim('"')
-                if (ssid.isNotBlank() && ssid != WifiManagerUnknownSsid) {
-                    if ((!pendingPrefix && ssid == pendingSsid) || ssid.startsWith(DashConfig.DEFAULT_PREFIX)) {
-                        return net
-                    }
-                }
-                // On Android 13+, WifiInfo.ssid on a suggestion network may be redacted unless
-                // FLAG_INCLUDE_LOCATION_INFO is used. Check LinkProperties for the Tripper Dash
-                // gateway/subnet (192.168.1.x or 192.168.43.x) on a non-validated Wi-Fi link.
-                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                    val lp = cm.getLinkProperties(net)
-                    val addresses = lp?.linkAddresses?.mapNotNull { it.address?.hostAddress }.orEmpty()
-                    val routes = lp?.routes?.mapNotNull { it.gateway?.hostAddress }.orEmpty()
-                    val isDashSubnet = (addresses + routes).any {
-                        it.startsWith("192.168.1.") || it.startsWith("192.168.43.")
-                    }
-                    if (isDashSubnet) return net
+                if (isLikelyDashNetwork(net, checkStrict = true)) {
+                    return net
                 }
             }
             null
@@ -203,6 +185,8 @@ class DashWifiManager(
                 override fun onAvailable(network: Network) = handleAvailable(network)
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
                     handleCaps(network, caps)
+                override fun onLinkPropertiesChanged(network: Network, lp: android.net.LinkProperties) =
+                    handleLinkProperties(network, lp)
                 override fun onUnavailable() = handleUnavailable()
                 override fun onLost(network: Network) = handleLost(network)
             }
@@ -211,6 +195,8 @@ class DashWifiManager(
                 override fun onAvailable(network: Network) = handleAvailable(network)
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
                     handleCaps(network, caps)
+                override fun onLinkPropertiesChanged(network: Network, lp: android.net.LinkProperties) =
+                    handleLinkProperties(network, lp)
                 override fun onUnavailable() = handleUnavailable()
                 override fun onLost(network: Network) = handleLost(network)
             }
@@ -233,33 +219,61 @@ class DashWifiManager(
             "password=${if (pendingPassword.isBlank()) "none" else "set"})")
         _state.value = WifiState(status = WifiConnStatus.REQUESTING, ssid = pendingSsid)
 
-        // 1. Fast path for closed-app / WifiNetworkSuggestion auto-connect:
-        // If Android OS already joined the RE_* Wi-Fi in the background, adopt that Network
-        // immediately and watch it with a specifier-free callback (works even with 0 open Activities!).
-        val existingNet = findExistingDashNetwork()
         val passiveRequest = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
+        // 1. Check if the phone is ALREADY connected to the bike's Wi-Fi network (via OS
+        // WifiNetworkSuggestion or Android Saved Wi-Fi). This works in both foreground and
+        // background and avoids popping up a redundant system companion picker dialog.
+        val existingNet = findExistingDashNetwork()
         if (existingNet != null) {
-            Log.i(TAG, "Adopted already-connected OS suggestion network: $existingNet")
+            Log.i(TAG, "Adopted already-connected bike Wi-Fi network: $existingNet")
             val passiveCb = buildCallback()
             passiveBgCallback = passiveCb
             runCatching { cm.registerNetworkCallback(passiveRequest, passiveCb) }
-            handleAvailable(existingNet)
+            promoteToConnected(existingNet)
             return
         }
 
-        // 2. When connecting from background (app closed), register a specifier-free listener
-        // for the OS-managed WifiNetworkSuggestion network first. Why? Because Android 10+ rejects
-        // WifiNetworkSpecifier.requestNetwork() when an app has no visible foreground Activity,
-        // whereas registerNetworkCallback() on the suggestion network succeeds 100% of the time!
+        // 2. When connecting headlessly from the background (app closed), do NOT call
+        // cm.requestNetwork(WifiNetworkSpecifier) — Android 10–16 immediately rejects
+        // WifiNetworkSpecifier from background apps by firing onUnavailable() after ~10ms,
+        // which would abort our connection! Instead, register the specifier-free callback
+        // and poll for DHCP completion on the OS-joined Wi-Fi network.
         if (pendingFromBackground) {
             val passiveCb = buildCallback()
             passiveBgCallback = passiveCb
-            runCatching { cm.registerNetworkCallback(passiveRequest, passiveCb) }
+            try {
+                cm.registerNetworkCallback(passiveRequest, passiveCb)
+                Log.i(TAG, "Registered background passive Wi-Fi callback for '$pendingSsid'")
+                // Also poll cm.allNetworks briefly in case the network associated right before
+                // our callback was registered and DHCP is finishing up.
+                reconnectJob?.cancel()
+                reconnectJob = scope.launch {
+                    repeat(20) {
+                        delay(500)
+                        if (!wantConnected || _state.value.status == WifiConnStatus.CONNECTED) return@launch
+                        findExistingDashNetwork()?.let { net ->
+                            Log.i(TAG, "Background poll found active Dash Wi-Fi network: $net")
+                            promoteToConnected(net)
+                            return@launch
+                        }
+                    }
+                }
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "registerNetworkCallback failed in background: ${e.message}")
+            }
         }
+
+        // 3. Foreground connection path (when the bike's Wi-Fi isn't already joined):
+        // Also keep a passive callback active so if the OS auto-joins the network as a saved/suggested
+        // network while the specifier request is pending, we still adopt it immediately.
+        val passiveCb = buildCallback()
+        passiveBgCallback = passiveCb
+        runCatching { cm.registerNetworkCallback(passiveRequest, passiveCb) }
 
         val specBuilder = WifiNetworkSpecifier.Builder()
         if (pendingPrefix) specBuilder.setSsidPattern(PatternMatcher(pendingSsid, PatternMatcher.PATTERN_PREFIX))
@@ -277,8 +291,8 @@ class DashWifiManager(
         try {
             cm.requestNetwork(request, cb, CONNECT_TIMEOUT)
         } catch (e: Exception) {
-            Log.w(TAG, "requestNetwork specifier rejected/threw (bg=$pendingFromBackground): ${e.message}")
-            if (!pendingFromBackground || passiveBgCallback == null) {
+            Log.w(TAG, "requestNetwork specifier threw: ${e.message}")
+            if (passiveBgCallback == null) {
                 _state.value = WifiState(
                     status = WifiConnStatus.ERROR,
                     ssid   = pendingSsid,
@@ -288,62 +302,127 @@ class DashWifiManager(
         }
     }
 
-    private fun isLikelyDashNetwork(network: Network): Boolean {
-        if (!pendingFromBackground) return true
+    @SuppressLint("MissingPermission")
+    fun isLikelyDashNetwork(network: Network, checkStrict: Boolean = false): Boolean {
         val caps = cm.getNetworkCapabilities(network) ?: return false
         if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return false
+
+        // 1. Check SSID from NetworkCapabilities.transportInfo or WifiManager.connectionInfo
         val info = caps.transportInfo as? WifiInfo
-        val ssid = info?.ssid.orEmpty().trim('"')
-        if (ssid.isNotBlank() && ssid != WifiManagerUnknownSsid) {
-            return (!pendingPrefix && ssid == pendingSsid) || ssid.startsWith(DashConfig.DEFAULT_PREFIX)
+        val rawCapsSsid = info?.ssid.orEmpty().trim('"')
+        val rawConnSsid = runCatching {
+            @Suppress("DEPRECATION")
+            wifi.connectionInfo?.ssid.orEmpty().trim('"')
+        }.getOrDefault("")
+
+        val knownSsid = listOf(rawCapsSsid, rawConnSsid).firstOrNull {
+            it.isNotBlank() && it != WifiManagerUnknownSsid
         }
+        if (knownSsid != null) {
+            val target = pendingSsid.ifBlank { DashConfig.get(context).ssid }
+            return (target.isNotBlank() && !pendingPrefix && knownSsid == target) ||
+                knownSsid.startsWith(DashConfig.DEFAULT_PREFIX)
+        }
+
+        // 2. If SSID is redacted by Android ("<unknown ssid>" in background without background
+        // location permission), inspect LinkProperties and DhcpInfo for the Tripper Dash subnet
+        // (192.168.1.x or 192.168.43.x) on a Wi-Fi network WITHOUT validated internet.
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            return false
+        }
+
         val lp = cm.getLinkProperties(network)
-        val routes = (lp?.linkAddresses?.mapNotNull { it.address?.hostAddress }.orEmpty() +
-            lp?.routes?.mapNotNull { it.gateway?.hostAddress }.orEmpty())
-        if (routes.any { it.startsWith("192.168.1.") || it.startsWith("192.168.43.") }) return true
-        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-            findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false) != null
+        val addresses = lp?.linkAddresses?.mapNotNull { it.address?.hostAddress }.orEmpty()
+        val routes = lp?.routes?.mapNotNull { it.gateway?.hostAddress }.orEmpty()
+        if ((addresses + routes).any { it.startsWith("192.168.1.") || it.startsWith("192.168.43.") }) {
+            return true
+        }
+
+        // Check DhcpInfo gateway/ipAddress (requires only ACCESS_WIFI_STATE, never redacted in background)
+        val dhcpMatch = runCatching {
+            @Suppress("DEPRECATION")
+            val dhcp = wifi.dhcpInfo
+            if (dhcp != null && dhcp.ipAddress != 0) {
+                val ipB0 = dhcp.ipAddress and 0xFF
+                val ipB1 = (dhcp.ipAddress shr 8) and 0xFF
+                val ipB2 = (dhcp.ipAddress shr 16) and 0xFF
+                ipB0 == 192 && ipB1 == 168 && (ipB2 == 1 || ipB2 == 43)
+            } else false
+        }.getOrDefault(false)
+        if (dhcpMatch) return true
+
+        if (checkStrict) return false
+        return findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false) != null
     }
 
-    private fun handleAvailable(network: Network) {
-        if (!isLikelyDashNetwork(network)) {
-            Log.d(TAG, "Ignoring non-dash Wi-Fi network $network during background watch")
-            return
-        }
+    private fun promoteToConnected(network: Network) {
+        val prevNet = this@DashWifiManager.network
+        val alreadyConnectedSameNet = prevNet == network && _state.value.status == WifiConnStatus.CONNECTED
         this@DashWifiManager.network = network
         everConnected = true
-        reconnectJob?.cancel()
+
+        val savedSsid = DashConfig.get(context).ssid
         val resolved = resolveSsid(network).takeIf { it.isNotBlank() }
-            ?: findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false)
+            ?: findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false)?.takeIf { it.isNotBlank() }
+            ?: pendingSsid.takeIf { it.isNotBlank() && !it.endsWith("_") }
+            ?: savedSsid.takeIf { it.isNotBlank() }
             ?: pendingSsid
-        Log.i(TAG, "WiFi connected ✓  ssid='$resolved' network=$network")
-        if (resolved.isNotBlank() && !resolved.endsWith("_")) {
+
+        if (resolved.isNotBlank() && !resolved.endsWith("_") && resolved != resolvedSsid) {
             resolvedSsid = resolved
             onSsidResolved?.invoke(resolved)
         }
-        _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = resolved)
+
+        if (!alreadyConnectedSameNet || _state.value.ssid != resolved) {
+            Log.i(TAG, "WiFi connected ✓  ssid='$resolved' network=$network (bg=$pendingFromBackground)")
+            _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = resolved)
+        }
+    }
+
+    private fun handleAvailable(network: Network) {
+        if (isLikelyDashNetwork(network)) {
+            promoteToConnected(network)
+            return
+        }
+        // DHCP may still be assigning 192.168.1.x at the exact millisecond onAvailable fires.
+        // Re-check after 300ms and 900ms in case onLinkPropertiesChanged doesn't fire separately.
+        scope.launch {
+            for (waitMs in longArrayOf(300L, 600L, 1000L)) {
+                delay(waitMs)
+                if (!wantConnected || _state.value.status == WifiConnStatus.CONNECTED) return@launch
+                if (isLikelyDashNetwork(network)) {
+                    Log.i(TAG, "Wi-Fi network $network verified as Dash after DHCP delay")
+                    promoteToConnected(network)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    private fun handleLinkProperties(network: Network, lp: android.net.LinkProperties) {
+        if (!wantConnected) return
+        val addrs = lp.linkAddresses.mapNotNull { it.address?.hostAddress }
+        Log.d(TAG, "onLinkPropertiesChanged net=$network addrs=$addrs")
+        if (isLikelyDashNetwork(network)) {
+            promoteToConnected(network)
+        }
     }
 
     private fun handleCaps(network: Network, caps: NetworkCapabilities) {
+        if (!wantConnected) return
         if (!isLikelyDashNetwork(network)) return
-        val info = caps.transportInfo as? WifiInfo
-        val rawSsid = info?.ssid.orEmpty().trim('"')
-        val ssid = if (rawSsid.isBlank() || rawSsid == WifiManagerUnknownSsid) {
-            findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false).orEmpty()
-        } else rawSsid
-        if (ssid.isBlank() || ssid == WifiManagerUnknownSsid) return
-        if (ssid == resolvedSsid && this@DashWifiManager.network == network) return
-        resolvedSsid = ssid
-        this@DashWifiManager.network = network
-        Log.i(TAG, "Resolved dash SSID: '$ssid'")
-        onSsidResolved?.invoke(ssid)
-        _state.value = WifiState(status = WifiConnStatus.CONNECTED, ssid = ssid)
+        promoteToConnected(network)
     }
 
     private fun handleUnavailable() {
         // If we are already connected via the passive WifiNetworkSuggestion path, ignore
         // a failure from the parallel WifiNetworkSpecifier request!
         if (this@DashWifiManager.network != null && _state.value.status == WifiConnStatus.CONNECTED) {
+            return
+        }
+        // If another active Wi-Fi network is already the Dash network, adopt it instead of failing!
+        findExistingDashNetwork()?.let { net ->
+            promoteToConnected(net)
             return
         }
         this@DashWifiManager.network = null
@@ -392,6 +471,11 @@ class DashWifiManager(
         val info = caps?.transportInfo as? WifiInfo
         val fromCaps = info?.ssid.orEmpty().trim('"').let { if (it == WifiManagerUnknownSsid) "" else it }
         if (fromCaps.isNotBlank()) return fromCaps
+        val fromConn = runCatching {
+            @Suppress("DEPRECATION")
+            wifi.connectionInfo?.ssid?.trim('"')?.takeIf { it != WifiManagerUnknownSsid }
+        }.getOrNull().orEmpty()
+        if (fromConn.isNotBlank()) return fromConn
         return findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false).orEmpty()
     }
 

@@ -60,6 +60,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // If the phone is already connected to the bike's RE_* Wi-Fi (or sees it in range)
+        // when the app comes to the foreground, auto-start the Dash session in 0 taps.
+        com.example.northstar.dash.FastReconnectManager.onAppForegrounded(applicationContext)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)

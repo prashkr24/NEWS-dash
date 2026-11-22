@@ -79,10 +79,20 @@ fun V2ExploreScreen(
                 PackageManager.PERMISSION_GRANTED
         )
     }
+    var hasBgLocPerm by remember {
+        mutableStateOf(com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx))
+    }
+    val bgLocLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasBgLocPerm = granted || com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx)
+        com.example.northstar.dash.FastReconnectManager.sync(ctx)
+    }
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { res ->
         hasLocPerm = res[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        hasBgLocPerm = com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx)
         if (essentialPermissions.all { res[it] == true }) {
             dashViewModel.connect()
         }
@@ -183,6 +193,41 @@ fun V2ExploreScreen(
                         )
                     }
                 }
+            }
+        }
+
+        // ── 1b. One-Tap Closed-App Auto-Connect Permission Banner ─────────────
+        if (wirelessAuto && hasLocPerm && !hasBgLocPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(BravaDim)
+                    .border(1.dp, Brava, RoundedCornerShape(14.dp))
+                    .clickable {
+                        bgLocLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            ) {
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        "Enable Closed-App Auto-Connect",
+                        color = BravaBright,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = GeistFamily,
+                    )
+                    Text(
+                        "Tap to set Location to 'Allow all the time' so WayDash auto-starts & streams GPS when your phone connects to bike Wi-Fi in your pocket.",
+                        color = TextMid,
+                        fontSize = 11.sp,
+                        fontFamily = GeistFamily,
+                    )
+                }
+                NorthstarChip("Allow →", ChipTone.Gold)
             }
         }
 
