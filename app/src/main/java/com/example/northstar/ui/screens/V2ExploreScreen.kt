@@ -205,7 +205,7 @@ fun V2ExploreScreen(
                     .fillMaxWidth()
                     .padding(bottom = 12.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(BravaDim)
+                    .background(Surf1)
                     .border(1.dp, Brava, RoundedCornerShape(14.dp))
                     .clickable {
                         bgLocLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
