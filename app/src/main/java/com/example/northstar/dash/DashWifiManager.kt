@@ -74,6 +74,9 @@ class DashWifiManager(
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var passiveBgCallback: ConnectivityManager.NetworkCallback? = null
+    // Active (non-specifier) REQUEST keeping Android ConnectivityService from tearing down the
+    // bike's no-internet Wi-Fi as "unwanted" after captive-portal validation fails.
+    private var holdNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private var reconnectJob: Job? = null
     // True once we've successfully connected this session. Lets us tell a MID-RIDE drop (keep
     // retrying — the dash AP may have hung and will return after a power-cycle) apart from a failed
@@ -355,11 +358,43 @@ class DashWifiManager(
         return findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false) != null
     }
 
+    /**
+     * Acquires a specifier-free `NetworkRequest` (`TRANSPORT_WIFI` without `NET_CAPABILITY_INTERNET`)
+     * so Android's `ConnectivityService` sees an active requester for the bike's no-internet Wi-Fi
+     * and does NOT tear down the connection after captive-portal validation fails.
+     * Because there is no `WifiNetworkSpecifier`, this is allowed from background services without
+     * any system dialog and keeps cellular active as the default internet route.
+     */
+    private fun ensureWifiHoldLease() {
+        if (holdNetworkCallback != null) return
+        val holdReq = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(net: Network) {
+                Log.d(TAG, "Active non-internet Wi-Fi hold lease confirmed on $net")
+            }
+            override fun onLost(net: Network) {
+                handleLost(net)
+            }
+        }
+        holdNetworkCallback = cb
+        runCatching {
+            cm.requestNetwork(holdReq, cb)
+            Log.i(TAG, "Acquired active non-internet Wi-Fi hold lease (prevents OS no-internet drop)")
+        }.onFailure { e ->
+            holdNetworkCallback = null
+            Log.w(TAG, "Could not acquire Wi-Fi hold lease: ${e.message}")
+        }
+    }
+
     private fun promoteToConnected(network: Network) {
         val prevNet = this@DashWifiManager.network
         val alreadyConnectedSameNet = prevNet == network && _state.value.status == WifiConnStatus.CONNECTED
         this@DashWifiManager.network = network
         everConnected = true
+        ensureWifiHoldLease()
 
         val savedSsid = DashConfig.get(context).ssid
         val resolved = resolveSsid(network).takeIf { it.isNotBlank() }
@@ -446,8 +481,10 @@ class DashWifiManager(
     }
 
     private fun handleLost(network: Network) {
-        if (this@DashWifiManager.network != null && this@DashWifiManager.network != network) return
-        Log.w(TAG, "WiFi link lost — reconnecting in ${RECONNECT_DELAY}ms")
+        val activeNet = this@DashWifiManager.network
+        // Strictly ignore onLost from any other Wi-Fi (e.g., home Wi-Fi dropping during handoff)
+        if (activeNet == null || activeNet != network) return
+        Log.w(TAG, "Dash WiFi link lost ($network) — reconnecting in ${RECONNECT_DELAY}ms")
         this@DashWifiManager.network = null
         _state.value = WifiState(
             status = WifiConnStatus.REQUESTING,
@@ -484,6 +521,8 @@ class DashWifiManager(
         networkCallback = null
         passiveBgCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
         passiveBgCallback = null
+        holdNetworkCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        holdNetworkCallback = null
         network = null
     }
 }

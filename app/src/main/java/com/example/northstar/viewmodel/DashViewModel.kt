@@ -220,9 +220,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // WiFi layer now retrying through an AP-missing window, this keeps trying long enough that a
         // power-cycle auto-rejoins with no manual step. Still bounded so a truly-gone dash frees power.
         private const val RECONNECT_GIVEUP_MS = 120_000L
-        // Shorter give-up window (25 s) when triggered headlessly from background so a brief pass near
-        // the bike never holds resources for 2 minutes if the session doesn't reach STREAMING.
-        private const val BG_RECONNECT_GIVEUP_MS = 25_000L
+        // Shorter give-up window (35 s) when triggered headlessly from background so a brief pass near
+        // the bike never holds resources for 2 minutes while still leaving room for DHCP + auth retries.
+        private const val BG_RECONNECT_GIVEUP_MS = 35_000L
         // Alert the rider after this long of sustained (non-transient) link loss — long enough to skip
         // a brief blip that auto-recovers, short enough that they're not riding blind for minutes.
         private const val CONN_LOST_ALERT_MS = 12_000L
@@ -317,10 +317,13 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // When we connect to a previously-unknown dash by prefix, learn + persist its exact
         // SSID so subsequent connects target it directly (no system picker again).
         wifiManager.onSsidResolved = { learned ->
+            val changed = learned != dashConfig.ssid
             dashConfig.ssid = learned
             session.updateSsid(learned)
             _ui.update { it.copy(ssid = learned) }
-            com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+            if (changed) {
+                com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+            }
         }
 
         viewModelScope.launch {
@@ -396,6 +399,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                         everStreamed = true
                         isBackgroundAttempt = false   // promoted to full active ride session
                         authAttempts = 0; _ui.update { it.copy(retryAttempt = 0, errorMessage = null) }
+                        DashKeepAliveService.updateStatus(
+                            "WayDash — live on Tripper Dash ✓",
+                            "Streaming map · Phone screen can stay off",
+                        )
                         // Usage: the dash actually started showing the map — the core feature working.
                         com.example.northstar.util.Telemetry.logEvent("dash_streaming")
                     }
@@ -697,18 +704,18 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     fun setSsid(s: String) {
         dashConfig.ssid = s.trim()
         _ui.update { it.copy(ssid = s.trim()) }
-        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication(), forceReset = true)
     }
     fun setWifiPassword(p: String) {
         dashConfig.password = p
         _ui.update { it.copy(wifiPassword = p) }
-        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication(), forceReset = true)
     }
     /** Forget the paired dash so the next connect rediscovers any RE_* dash by prefix. */
     fun forgetDash() {
         dashConfig.forgetDash()
         _ui.update { it.copy(ssid = "") }
-        com.example.northstar.dash.FastReconnectManager.sync(getApplication())
+        com.example.northstar.dash.FastReconnectManager.sync(getApplication(), forceReset = true)
     }
 
     // ── Destination + routing ───────────────────────────────────────────────

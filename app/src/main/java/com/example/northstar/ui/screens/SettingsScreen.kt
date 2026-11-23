@@ -157,7 +157,7 @@ fun SettingsScreen(
                     NorthstarToggle(wirelessAuto) {
                         wirelessAuto = it
                         com.example.northstar.data.DashPrefs.setWirelessAutoConnect(ctx, it)
-                        com.example.northstar.dash.FastReconnectManager.sync(ctx)
+                        com.example.northstar.dash.FastReconnectManager.sync(ctx, forceReset = true)
                     }
                 },
             )

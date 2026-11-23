@@ -55,6 +55,7 @@ object FastReconnectManager {
     @Volatile private var lastSessionEndMs = 0L
     @Volatile private var lastAutoTriggerMs = 0L
     @Volatile private var lastTriggeredScanTimestampUs = 0L
+    @Volatile private var lastSyncedSignature: String? = null
 
     private val scanExecutor by lazy {
         Executors.newSingleThreadScheduledExecutor { r ->
@@ -90,14 +91,63 @@ object FastReconnectManager {
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     /**
+     * Returns true if the phone is currently associated with the bike's `RE_*` Wi-Fi.
+     * Used as a safety guard so we NEVER call `removeNetworkSuggestions()` while connected
+     * (Android immediately disconnects the active Wi-Fi link whenever its suggestion is removed!).
+     */
+    @SuppressLint("MissingPermission")
+    fun isCurrentlyOnBikeWifi(context: Context): Boolean {
+        val appCtx = context.applicationContext
+        val cfg = DashConfig.get(appCtx)
+        val w = wifi(appCtx)
+        if (!w.isWifiEnabled) return false
+        val connSsid = runCatching {
+            @Suppress("DEPRECATION")
+            w.connectionInfo?.ssid.orEmpty().trim('"')
+        }.getOrDefault("")
+        if (connSsid.isNotBlank() && connSsid != UNKNOWN_SSID) {
+            if ((cfg.ssid.isNotBlank() && connSsid == cfg.ssid) || connSsid.startsWith(cfg.ssidPrefix)) {
+                return true
+            }
+        }
+        val connMgr = cm(appCtx)
+        return runCatching {
+            connMgr.allNetworks.any { net ->
+                val caps = connMgr.getNetworkCapabilities(net) ?: return@any false
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return@any false
+                val info = caps.transportInfo as? WifiInfo
+                val ssid = info?.ssid.orEmpty().trim('"')
+                if (ssid.isNotBlank() && ssid != UNKNOWN_SSID) {
+                    (cfg.ssid.isNotBlank() && ssid == cfg.ssid) || ssid.startsWith(cfg.ssidPrefix)
+                } else if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    val lp = connMgr.getLinkProperties(net)
+                    val addrs = lp?.linkAddresses?.mapNotNull { it.address?.hostAddress }.orEmpty()
+                    val routes = lp?.routes?.mapNotNull { it.gateway?.hostAddress }.orEmpty()
+                    (addrs + routes).any { it.startsWith("192.168.1.") || it.startsWith("192.168.43.") }
+                } else false
+            }
+        }.getOrDefault(false)
+    }
+
+    /** Ensure passive OS listeners are registered without touching Wi-Fi suggestions. */
+    fun ensureWatchersRegistered(context: Context) {
+        val appCtx = context.applicationContext
+        registerPassiveNetworkWatcher(appCtx)
+        registerPassiveScanWatcher(appCtx)
+    }
+
+    /**
      * Called when the user opens or resumes [com.example.northstar.MainActivity].
-     * Re-syncs Wi-Fi suggestions and immediately checks if the phone is ALREADY connected
-     * to the bike's Wi-Fi (or sees it in fresh scan results) so the rider never has to tap Connect.
+     * Ensures passive watchers are active and checks if the phone is ALREADY connected
+     * to the bike's Wi-Fi so the rider never has to tap Connect.
      */
     fun onAppForegrounded(context: Context) {
         val appCtx = context.applicationContext
         lastSessionEndMs = 0L
-        sync(appCtx)
+        ensureWatchersRegistered(appCtx)
+        if (!isCurrentlyOnBikeWifi(appCtx)) {
+            sync(appCtx, forceReset = false)
+        }
         scanExecutor.execute {
             checkActiveWifiAndAutoConnect(appCtx, fromForeground = true)
             checkScanAndAutoConnect(appCtx)
@@ -111,7 +161,10 @@ object FastReconnectManager {
      */
     fun schedulePostBluetoothChecks(context: Context) {
         val appCtx = context.applicationContext
-        sync(appCtx)
+        ensureWatchersRegistered(appCtx)
+        if (!isCurrentlyOnBikeWifi(appCtx)) {
+            sync(appCtx, forceReset = false)
+        }
         for (delaySec in longArrayOf(0L, 2L, 5L, 9L, 14L)) {
             scanExecutor.schedule({
                 checkActiveWifiAndAutoConnect(appCtx)
@@ -123,14 +176,19 @@ object FastReconnectManager {
     /**
      * Synchronize the [WifiNetworkSuggestion] registration with the user's current settings
      * and learned `RE_*` SSID, and ensure the passive network & scan watchers are active.
+     *
+     * IMPORTANT: On Android, calling `removeNetworkSuggestions()` while connected to a suggested
+     * Wi-Fi IMMEDIATELY disconnects that Wi-Fi! Therefore this method is strictly idempotent:
+     * it checks existing suggestions first and NEVER removes/re-adds an already-active suggestion
+     * unless [forceReset] is true (e.g., user explicitly changed SSID/password or disabled the feature).
      */
     @SuppressLint("MissingPermission")
-    fun sync(context: Context): String {
+    fun sync(context: Context, forceReset: Boolean = false): String {
         val appCtx = context.applicationContext
-        registerPassiveNetworkWatcher(appCtx)
-        registerPassiveScanWatcher(appCtx)
+        ensureWatchersRegistered(appCtx)
 
         if (!DashPrefs.wirelessAutoConnect(appCtx)) {
+            lastSyncedSignature = null
             clearSuggestions(appCtx)
             return "Off · manual or in-app connect only"
         }
@@ -141,16 +199,45 @@ object FastReconnectManager {
             return "Active · passive watcher waiting for first ${cfg.ssidPrefix}* pairing"
         }
 
+        val requireInteraction = hasBackgroundLocationPermission(appCtx)
+        val signature = "$ssid|${cfg.password}|$requireInteraction"
+
+        // Fast idempotency check: if we already registered this exact suggestion, don't touch WifiManager!
+        if (!forceReset && lastSyncedSignature == signature) {
+            return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
+        }
+
         return try {
-            val allPossible = buildAllSuggestionVariants(ssid, cfg.password)
-            val activeSuggestions = buildSuggestions(appCtx, ssid, cfg.password)
             val w = wifi(appCtx)
-            runCatching { w.removeNetworkSuggestions(allPossible) }
+            // On Android 11+ (API 30+), inspect what the OS already holds for our app.
+            // If a matching suggestion for this SSID is ALREADY registered and we aren't force-resetting,
+            // leave it untouched so we NEVER kick the phone off an active bike Wi-Fi link!
+            if (!forceReset && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val existing = runCatching { w.networkSuggestions }.getOrNull().orEmpty()
+                val alreadyHasSsid = existing.any { it.ssid == ssid }
+                if (alreadyHasSsid && (isCurrentlyOnBikeWifi(appCtx) || existing.any { it.ssid == ssid && it.isAppInteractionRequired == requireInteraction })) {
+                    lastSyncedSignature = signature
+                    Log.d(TAG, "WifiNetworkSuggestion already active for '$ssid' — skipping re-register")
+                    return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
+                }
+            }
+
+            // Safety guard: never remove suggestions while actively connected to the bike's Wi-Fi
+            if (!forceReset && isCurrentlyOnBikeWifi(appCtx)) {
+                Log.d(TAG, "Currently connected to bike Wi-Fi '$ssid' — deferring suggestion update")
+                return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
+            }
+
+            val activeSuggestions = buildSuggestions(appCtx, ssid, cfg.password)
+            if (forceReset) {
+                runCatching { w.removeNetworkSuggestions(buildAllSuggestionVariants(ssid, cfg.password)) }
+            }
             val status = w.addNetworkSuggestions(activeSuggestions)
             if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS ||
                 status == WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE
             ) {
-                Log.i(TAG, "WifiNetworkSuggestion active for '$ssid' (bgLoc=${hasBackgroundLocationPermission(appCtx)})")
+                lastSyncedSignature = signature
+                Log.i(TAG, "WifiNetworkSuggestion active for '$ssid' (bgLoc=$requireInteraction)")
                 "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
             } else {
                 Log.w(TAG, "addNetworkSuggestions status=$status")
@@ -165,10 +252,20 @@ object FastReconnectManager {
     @SuppressLint("MissingPermission")
     fun clearSuggestions(context: Context) {
         val appCtx = context.applicationContext
+        lastSyncedSignature = null
         val cfg = DashConfig.get(appCtx)
-        if (cfg.ssid.isBlank()) return
+        val w = wifi(appCtx)
         runCatching {
-            wifi(appCtx).removeNetworkSuggestions(buildAllSuggestionVariants(cfg.ssid, cfg.password))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val existing = w.networkSuggestions
+                if (existing.isNotEmpty()) {
+                    w.removeNetworkSuggestions(existing)
+                    return
+                }
+            }
+            if (cfg.ssid.isNotBlank()) {
+                w.removeNetworkSuggestions(buildAllSuggestionVariants(cfg.ssid, cfg.password))
+            }
         }
     }
 

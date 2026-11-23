@@ -31,7 +31,7 @@ class DashAutoConnectReceiver : BroadcastReceiver() {
         when (action) {
             WifiManager.ACTION_WIFI_NETWORK_SUGGESTION_POST_CONNECTION -> {
                 Log.i(TAG, "OS auto-joined suggested bike Wi-Fi → starting Dash session in background")
-                FastReconnectManager.sync(appCtx)
+                FastReconnectManager.ensureWatchersRegistered(appCtx)
                 DashViewModel.getInstance(appCtx).autoConnectFromBackground()
             }
             BluetoothDevice.ACTION_ACL_CONNECTED -> {

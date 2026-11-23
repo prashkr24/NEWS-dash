@@ -41,14 +41,29 @@ class DashKeepAliveService : Service() {
 
         @Volatile var isRunning = false
             private set
+        @Volatile private var activeInstance: DashKeepAliveService? = null
+        @Volatile private var currentTitle = "WayDash — linking to Tripper Dash…"
+        @Volatile private var currentText = "Connecting Wi-Fi & authenticating Dash"
 
         fun start(context: Context) {
+            currentTitle = "WayDash — linking to Tripper Dash…"
+            currentText = "Connecting Wi-Fi & authenticating Dash"
             val i = Intent(context, DashKeepAliveService::class.java).setAction(ACTION_START)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i)
                 else context.startService(i)
             }.onFailure { e ->
                 Log.w(TAG, "Could not start DashKeepAliveService from current context: ${e.message}")
+            }
+        }
+
+        fun updateStatus(title: String, text: String) {
+            currentTitle = title
+            currentText = text
+            val svc = activeInstance ?: return
+            runCatching {
+                val nm = svc.getSystemService(NotificationManager::class.java)
+                nm.notify(NOTIF_ID, svc.buildNotification())
             }
         }
 
@@ -71,15 +86,20 @@ class DashKeepAliveService : Service() {
                 com.example.northstar.dash.FastReconnectManager.notifyManualDisconnect()
                 com.example.northstar.viewmodel.DashViewModel.getInstance(applicationContext).disconnect()
                 isRunning = false
+                activeInstance = null
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_STOP -> {
                 isRunning = false
+                activeInstance = null
                 stopSelf()
                 return START_NOT_STICKY
             }
-            else -> startForegroundLocks()
+            else -> {
+                activeInstance = this
+                startForegroundLocks()
+            }
         }
         // START_STICKY: if the OS kills us under memory pressure, restart so the
         // ride keeps streaming.
@@ -156,6 +176,7 @@ class DashKeepAliveService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        if (activeInstance === this) activeInstance = null
         releaseLocks()
         Log.i(TAG, "Foreground service stopped — locks released")
         super.onDestroy()
@@ -195,8 +216,8 @@ class DashKeepAliveService : Service() {
         ).build()
 
         return builder
-            .setContentTitle("WayDash — connected to Tripper Dash")
-            .setContentText("Streaming live map · Phone screen can stay off")
+            .setContentTitle(currentTitle)
+            .setContentText(currentText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(open)
