@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- startScan() to warm scan results so we resolve the exact dash SSID on the first try -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Keep Qualcomm/Android APF from dropping Tripper Dash 192.168.1.255:2002 UDP broadcast
+         auth & ack packets when the phone screen is OFF in the rider's pocket. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Android 13+: WiFi connection without location permission -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
@@ -88,7 +91,7 @@
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.action.LAUNCHER" />
             </intent-filter>
             <!-- Receive "Share" from Google Maps -->
             <intent-filter>
@@ -141,6 +144,7 @@
             <intent-filter>
                 <action android:name="android.net.wifi.action.WIFI_NETWORK_SUGGESTION_POST_CONNECTION" />
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="com.example.northstar.ACTION_BLE_BIKE_WAKE" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>

@@ -28,7 +28,9 @@ object RoutingHub {
             val key = RoutePrefs.tomtomKey(context)
             if (key != null) {
                 val r = TomTomRouter.routes(from, to, key)
-                if (r.isNotEmpty()) return RoutingOutcome(r, ENGINE_LABEL_TOMTOM)
+                if (r.isNotEmpty()) {
+                    return RoutingOutcome(FlyoverRouteEnricher.enrichRoutes(context, r), ENGINE_LABEL_TOMTOM)
+                }
                 val code = TomTomRouter.lastFailureCode
                 val notice = when (code) {
                     403, 429 -> "TomTom daily limit reached — routes from OSRM (no live traffic)"
@@ -36,11 +38,12 @@ object RoutingHub {
                     else     -> "TomTom failed (HTTP $code) — routes from OSRM (no live traffic)"
                 }
                 Log.w(TAG, notice)
-                val fallback = Router.routes(from, to)
+                val fallback = FlyoverRouteEnricher.enrichRoutes(context, Router.routes(from, to))
                 return RoutingOutcome(fallback, ENGINE_LABEL_OSRM, notice)
             }
         }
-        return RoutingOutcome(Router.routes(from, to), ENGINE_LABEL_OSRM)
+        val osrm = FlyoverRouteEnricher.enrichRoutes(context, Router.routes(from, to))
+        return RoutingOutcome(osrm, ENGINE_LABEL_OSRM)
     }
 
     suspend fun routes(context: Context, from: GeoPoint, to: GeoPoint): List<Route> =

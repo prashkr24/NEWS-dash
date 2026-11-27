@@ -180,6 +180,19 @@ class DashWifiManager(
         _state.value = WifiState()
     }
 
+    /**
+     * Nudges the Wi-Fi manager while waiting in [WifiConnStatus.REQUESTING] (for example when
+     * `ACTION_WIFI_NETWORK_SUGGESTION_POST_CONNECTION` or [FastReconnectManager]'s callback fires)
+     * so an OS-joined `RE_*` network is promoted to [WifiConnStatus.CONNECTED] in 0ms.
+     */
+    fun recheckActiveNetworks() {
+        if (!wantConnected || _state.value.status == WifiConnStatus.CONNECTED) return
+        findExistingDashNetwork()?.let { net ->
+            Log.i(TAG, "recheckActiveNetworks adopted Dash Wi-Fi network: $net")
+            promoteToConnected(net)
+        }
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────
 
     private fun buildCallback(): ConnectivityManager.NetworkCallback =
@@ -240,23 +253,25 @@ class DashWifiManager(
             return
         }
 
-        // 2. When connecting headlessly from the background (app closed), do NOT call
-        // cm.requestNetwork(WifiNetworkSpecifier) — Android 10–16 immediately rejects
-        // WifiNetworkSpecifier from background apps by firing onUnavailable() after ~10ms,
-        // which would abort our connection! Instead, register the specifier-free callback
-        // and poll for DHCP completion on the OS-joined Wi-Fi network.
+        // 2. When connecting headlessly from the background (screen off / app closed):
+        //  • Do NOT pass a WifiNetworkSpecifier (Android 10–16 immediately rejects specifier
+        //    requests from background apps with onUnavailable()).
+        //  • DO acquire ensureWifiHoldLease() (specifier-free requestNetwork for TRANSPORT_WIFI
+        //    without NET_CAPABILITY_INTERNET) right away: this tells Android ConnectivityService
+        //    an app actively wants non-internet Wi-Fi, prompting WifiNetworkSelector to auto-join
+        //    our no-internet RE_* WifiNetworkSuggestion / Saved Wi-Fi even while mobile data is up!
+        //  • Poll across the full 42s Tripper boot/DHCP window so late DHCP completion is caught.
         if (pendingFromBackground) {
+            ensureWifiHoldLease()
             val passiveCb = buildCallback()
             passiveBgCallback = passiveCb
             try {
                 cm.registerNetworkCallback(passiveRequest, passiveCb)
-                Log.i(TAG, "Registered background passive Wi-Fi callback for '$pendingSsid'")
-                // Also poll cm.allNetworks briefly in case the network associated right before
-                // our callback was registered and DHCP is finishing up.
+                Log.i(TAG, "Registered background Wi-Fi demand + callback for '$pendingSsid'")
                 reconnectJob?.cancel()
                 reconnectJob = scope.launch {
-                    repeat(20) {
-                        delay(500)
+                    repeat(56) {
+                        delay(750)
                         if (!wantConnected || _state.value.status == WifiConnStatus.CONNECTED) return@launch
                         findExistingDashNetwork()?.let { net ->
                             Log.i(TAG, "Background poll found active Dash Wi-Fi network: $net")
@@ -374,6 +389,9 @@ class DashWifiManager(
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(net: Network) {
                 Log.d(TAG, "Active non-internet Wi-Fi hold lease confirmed on $net")
+                if (wantConnected && _state.value.status != WifiConnStatus.CONNECTED) {
+                    handleAvailable(net)
+                }
             }
             override fun onLost(net: Network) {
                 handleLost(net)
@@ -397,10 +415,11 @@ class DashWifiManager(
         ensureWifiHoldLease()
 
         val savedSsid = DashConfig.get(context).ssid
+        val directPending = pendingSsid.takeIf { !pendingPrefix && it.isNotBlank() && !it.endsWith("_") }
         val resolved = resolveSsid(network).takeIf { it.isNotBlank() }
-            ?: findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false)?.takeIf { it.isNotBlank() }
-            ?: pendingSsid.takeIf { it.isNotBlank() && !it.endsWith("_") }
+            ?: directPending
             ?: savedSsid.takeIf { it.isNotBlank() }
+            ?: findDashSsid(DashConfig.DEFAULT_PREFIX, triggerActiveScan = false)?.takeIf { it.isNotBlank() }
             ?: pendingSsid
 
         if (resolved.isNotBlank() && !resolved.endsWith("_") && resolved != resolvedSsid) {
@@ -414,19 +433,28 @@ class DashWifiManager(
         }
     }
 
+    private fun hasUnredactedDashSsid(network: Network): Boolean {
+        val s = resolveSsid(network)
+        if (s.isBlank()) return false
+        val target = pendingSsid.ifBlank { DashConfig.get(context).ssid }
+        return (target.isNotBlank() && !pendingPrefix && s == target) ||
+            s.startsWith(DashConfig.DEFAULT_PREFIX)
+    }
+
     private fun handleAvailable(network: Network) {
-        if (isLikelyDashNetwork(network)) {
+        // If we can read the unredacted RE_* SSID immediately, promote right away.
+        if (hasUnredactedDashSsid(network)) {
             promoteToConnected(network)
             return
         }
-        // DHCP may still be assigning 192.168.1.x at the exact millisecond onAvailable fires.
-        // Re-check after 300ms and 900ms in case onLinkPropertiesChanged doesn't fire separately.
+        // Otherwise wait briefly for Tripper DHCP (192.168.1.x) AND give home 192.168.1.1 routers
+        // ~1s to pass internet validation so we never mistake home Wi-Fi for a redacted-SSID Dash!
         scope.launch {
-            for (waitMs in longArrayOf(300L, 600L, 1000L)) {
+            for (waitMs in longArrayOf(400L, 600L, 900L, 1400L, 2200L)) {
                 delay(waitMs)
                 if (!wantConnected || _state.value.status == WifiConnStatus.CONNECTED) return@launch
-                if (isLikelyDashNetwork(network)) {
-                    Log.i(TAG, "Wi-Fi network $network verified as Dash after DHCP delay")
+                if (isLikelyDashNetwork(network, checkStrict = true)) {
+                    Log.i(TAG, "Wi-Fi network $network verified as Dash after DHCP/validation settle")
                     promoteToConnected(network)
                     return@launch
                 }
@@ -438,15 +466,16 @@ class DashWifiManager(
         if (!wantConnected) return
         val addrs = lp.linkAddresses.mapNotNull { it.address?.hostAddress }
         Log.d(TAG, "onLinkPropertiesChanged net=$network addrs=$addrs")
-        if (isLikelyDashNetwork(network)) {
+        if (hasUnredactedDashSsid(network)) {
             promoteToConnected(network)
         }
     }
 
     private fun handleCaps(network: Network, caps: NetworkCapabilities) {
         if (!wantConnected) return
-        if (!isLikelyDashNetwork(network)) return
-        promoteToConnected(network)
+        if (hasUnredactedDashSsid(network)) {
+            promoteToConnected(network)
+        }
     }
 
     private fun handleUnavailable() {

@@ -174,9 +174,12 @@ object Router {
                     val p = GeoPoint(loc.getDouble(1), loc.getDouble(0))
                     val type = ManeuverType.fromOsrm(man.optString("type"), man.optString("modifier"))
                     val name = step.optString("name").ifBlank { "road" }
-                    // India-aware elevated detection: Flyover/ROB/Brg/Elevated/Viaduct etc.
-                    // (FlyoverDetector) — mirrors Google Maps' "Take flyover" tooltip.
-                    val elevatedHint = FlyoverDetector.hint(name)
+                    // India-aware elevated detection across name, highway ref, and signpost destinations.
+                    val elevatedHint = FlyoverDetector.hint(
+                        name,
+                        step.optString("ref"),
+                        step.optString("destinations"),
+                    )
                     maneuvers.add(
                         Maneuver(
                             type = type,

@@ -103,7 +103,6 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     private val mediaInfo   = com.example.northstar.media.MediaInfoProvider(app)
-    private val callController = com.example.northstar.media.CallController(app)
     private var mediaObserveJob: Job? = null
     private val powerManager = app.getSystemService(Application.POWER_SERVICE) as PowerManager
 
@@ -134,9 +133,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var panX = 0f
     @Volatile private var panY = 0f
     @Volatile private var zoom = com.example.northstar.data.DashPrefs.zoom(app)
-    // Next-maneuver snapshot for the dash frame (flyover hint), updated by trackProgress.
+    // Next-maneuver + route-progress snapshot for the dash frame, updated by trackProgress.
     @Volatile private var lastNextManeuver: com.example.northstar.dash.nav.Maneuver? = null
-    @Volatile private var lastNextTurnM: Double = Double.MAX_VALUE  // restored last-used zoom (persists across close/upgrade)
+    @Volatile private var lastNextTurnM: Double = Double.MAX_VALUE
+    @Volatile private var lastRouteSplitIdx: Int = 0
+    @Volatile private var lastRouteSnapPt: GeoPoint? = null
     @Volatile private var headingUp = true
     @Volatile private var tiltedView = com.example.northstar.data.DashPrefs.tiltedView(app)
     @Volatile private var followMode = true
@@ -220,9 +221,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // WiFi layer now retrying through an AP-missing window, this keeps trying long enough that a
         // power-cycle auto-rejoins with no manual step. Still bounded so a truly-gone dash frees power.
         private const val RECONNECT_GIVEUP_MS = 120_000L
-        // Shorter give-up window (35 s) when triggered headlessly from background so a brief pass near
-        // the bike never holds resources for 2 minutes while still leaving room for DHCP + auth retries.
-        private const val BG_RECONNECT_GIVEUP_MS = 35_000L
+        // Shorter give-up window (42 s) when triggered headlessly from background so a brief pass near
+        // the bike never holds resources for 2 minutes while leaving room for Tripper boot + DHCP + auth.
+        private const val BG_RECONNECT_GIVEUP_MS = 42_000L
         // Alert the rider after this long of sustained (non-transient) link loss — long enough to skip
         // a brief blip that auto-recovers, short enough that they're not riding blind for minutes.
         private const val CONN_LOST_ALERT_MS = 12_000L
@@ -259,11 +260,6 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         // between joystick nudges, or a GPS fix gap) don't flap the cadence back and forth.
         private const val MOTION_HOLD_MS  = 1_500L
         private const val MAX_AUTH_ATTEMPTS = 4   // the fw 11.63 handshake often needs a couple of tries
-        // Dash joystick codes for call control while a call card is showing. UP = answer, DOWN =
-        // reject (intuitive accept/decline; verified on the bike that UP is the natural answer press,
-        // not IN). The HOME button is left alone — it does the dash's own exit-to-home.
-        private const val BTN_ANSWER = 0x06       // joystick UP
-        private const val BTN_REJECT = 0x07       // joystick DOWN
         // MAP-mode joystick codes (the dash forwards these directly while projecting, no media-control
         // mode needed) — confirmed in the ride log: 0x13/0x14 with callRinging=false during the map.
         // These give DIRECT zoom like the dash. In/out guess; swap if the ride feels wrong.
@@ -357,11 +353,18 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     WifiConnStatus.ERROR -> {
+                        val hadStreamed = everStreamed
                         // Dash is gone for good (bike powered off / out of range) → the ride is
                         // over. Save it even though the user never tapped Disconnect.
                         saveParkedBikeIfStreamed("Auto-pinned when bike powered off")
                         stopRecording()
-                        com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
+                        // Only impose the post-ride session cooldown if we actually streamed a ride;
+                        // a pre-stream failure while the dash AP is still booting should stay retryable!
+                        if (hadStreamed) {
+                            com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
+                        } else {
+                            com.example.northstar.dash.FastReconnectManager.releasePocketWakeLock()
+                        }
                         // …and release everything connect() acquired (wake/wifi locks, GPS,
                         // encoder loop). These used to leak when a connection ENDED on failure
                         // rather than via the Disconnect button, draining the battery in the
@@ -399,7 +402,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                         everStreamed = true
                         isBackgroundAttempt = false   // promoted to full active ride session
                         authAttempts = 0; _ui.update { it.copy(retryAttempt = 0, errorMessage = null) }
+                        com.example.northstar.dash.FastReconnectManager.notifySessionStarted()
                         DashKeepAliveService.updateStatus(
+                            getApplication(),
                             "WayDash — live on Tripper Dash ✓",
                             "Streaming map · Phone screen can stay off",
                         )
@@ -440,33 +445,18 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             com.example.northstar.data.RideDiagnostics.log("error", msg)
             _ui.update { it.copy(errorMessage = msg) }; refreshStage()
         }
-        // Joystick handling. While a call card is on the dash, the joystick answers/rejects the call
-        // (IN = answer, DOWN = reject) instead of zooming; otherwise RIGHT/LEFT zoom the map. The
-        // separate HOME button is intentionally untouched — it does the dash's native exit; its code
-        // just falls through to the logged-else branch. Codes verified fw 11.63: IN=0x18, RIGHT=0x09,
-        // LEFT=0x0A, DOWN=0x07. Every unmatched code is shown in ui.lastButton so we can retune.
+        // Joystick handling for map zoom and media skip (calls are display-only on the dash).
         session.onButton = { btn ->
             val code = btn.toInt() and 0xFF
-            val call = com.example.northstar.media.CallInfoProvider.incomingCall.value
-            val ringing = call?.incoming == true
-            val active  = call != null && !call.incoming
-            val label = when {
-                // Ringing: IN answers, DOWN rejects. Active call: DOWN hangs up (fixes "can't end").
-                ringing && code == BTN_ANSWER -> { answerCall(call!!); "Call answered" }
-                ringing && code == BTN_REJECT -> { endCall(call!!);    "Call rejected" }
-                active  && code == BTN_REJECT -> { endCall(call!!);    "Call ended" }
-                // Map/media controls run whenever a call ISN'T ringing (still usable during an active
-                // call — only DOWN is reserved for hang-up, and that's not a map/media code anyway).
-                !ringing && code == BTN_MAP_ZOOM_IN  -> { zoomIn();  "Zoom in (map)" }
-                !ringing && code == BTN_MAP_ZOOM_OUT -> { zoomOut(); "Zoom out (map)" }
-                !ringing && code == BTN_MEDIA_NEXT -> { mediaInfo.skipNext(); "Next track" }
-                !ringing && code == BTN_MEDIA_PREV -> { mediaInfo.skipPrevious(); "Previous track" }
+            val label = when (code) {
+                BTN_MAP_ZOOM_IN  -> { zoomIn();  "Zoom in (map)" }
+                BTN_MAP_ZOOM_OUT -> { zoomOut(); "Zoom out (map)" }
+                BTN_MEDIA_NEXT   -> { mediaInfo.skipNext(); "Next track" }
+                BTN_MEDIA_PREV   -> { mediaInfo.skipPrevious(); "Previous track" }
                 else -> "code 0x${code.toString(16).uppercase()}"
             }
-            // Persist every button code so untethered tests are diagnosable from the remote pull
-            // (the on-screen readout is invisible with the phone screen off / projecting).
             com.example.northstar.data.RideDiagnostics.log("button",
-                "0x%02X (ringing=%b active=%b) → %s".format(code, ringing, active, label))
+                "0x%02X → %s".format(code, label))
             _ui.update { it.copy(lastButton = label) }
         }
     }
@@ -487,6 +477,17 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     // ── Connection ─────────────────────────────────────────────────────────
 
     /**
+     * Nudges [DashWifiManager] when an external signal (`POST_CONNECTION` broadcast or
+     * [com.example.northstar.dash.FastReconnectManager] callback) sees the bike's `RE_*` Wi-Fi
+     * while we are already waiting in [ConnStage.WIFI].
+     */
+    fun nudgeBackgroundWifiCheck() {
+        if (userWantsConnection && _ui.value.stage == ConnStage.WIFI) {
+            wifiManager.recheckActiveNetworks()
+        }
+    }
+
+    /**
      * Headless auto-connect entry point called by [com.example.northstar.dash.FastReconnectManager]
      * or [com.example.northstar.dash.DashAutoConnectReceiver] when the bike's RE_* Wi-Fi hotspot
      * appears in range or connects automatically (Wireless Android Auto style).
@@ -495,7 +496,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         if (!com.example.northstar.data.DashPrefs.wirelessAutoConnect(app)) return
         val stage = _ui.value.stage
-        if (userWantsConnection || stage == ConnStage.STREAMING || stage == ConnStage.AUTH || stage == ConnStage.WIFI) return
+        if (stage == ConnStage.WIFI) {
+            wifiManager.recheckActiveNetworks()
+            return
+        }
+        if (userWantsConnection || stage == ConnStage.STREAMING || stage == ConnStage.AUTH) return
         if (!wifiManager.isWifiEnabled()) return
         val hasFineLoc = androidx.core.content.ContextCompat.checkSelfPermission(
             app, android.Manifest.permission.ACCESS_FINE_LOCATION
@@ -503,11 +508,17 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val hasCoarseLoc = androidx.core.content.ContextCompat.checkSelfPermission(
             app, android.Manifest.permission.ACCESS_COARSE_LOCATION
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (!hasFineLoc && !hasCoarseLoc && dashConfig.ssid.isBlank()) return
+        val hasNearbyWifi = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                app, android.Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!hasFineLoc && !hasCoarseLoc && !hasNearbyWifi && dashConfig.ssid.isBlank()) return
         android.util.Log.i("DashViewModel", "autoConnectFromBackground → starting headless dash connection")
         viewModelScope.launch {
             if (!userWantsConnection) {
                 connect(fromBackground = true)
+            } else if (_ui.value.stage == ConnStage.WIFI) {
+                wifiManager.recheckActiveNetworks()
             }
         }
     }
@@ -550,7 +561,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             "connect", "ssid='${dashConfig.ssid}' bg=$fromBackground needsDiscovery=${dashConfig.needsDiscovery} dest=${_ui.value.destinationName}",
         )
         loggedFirstFrame = false
-        DashKeepAliveService.start(getApplication())
+        DashKeepAliveService.start(getApplication(), fromBackground = fromBackground)
         // Battery optimization: when triggered headlessly from background, do NOT start high-frequency
         // GPS or RideRecorder until the Dash auth handshake actually succeeds (DashState.READY).
         if (!fromBackground) {
@@ -572,7 +583,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
         when {
             wifiManager.state.value.status == WifiConnStatus.CONNECTED ->
-                session.connect(_ui.value.ssid, wifiManager.network)
+                session.connect(_ui.value.ssid.ifBlank { dashConfig.ssid }, wifiManager.network)
             // Known SSID (stored or just found by scan) → exact connect + correct auth.
             dashConfig.ssid.isNotBlank() ->
                 wifiManager.connect(dashConfig.ssid, dashConfig.password, fromBackground = fromBackground)
@@ -609,7 +620,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Release everything that keeps the CPU/GPS/WiFi awake: the foreground service
-     * (PARTIAL_WAKE_LOCK + WifiLock), GPS updates, and the encoder/stream loop. Called
+     * (PARTIAL_WAKE_LOCK + WifiLock + MulticastLock), GPS updates, and the encoder/stream loop. Called
      * whenever the connection has ended so the app stops draining the battery in the
      * background — on an explicit disconnect, on a terminal connection failure (dash
      * unreachable / handshake exhausted), and when the ViewModel is cleared.
@@ -617,7 +628,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
     private fun releaseBackgroundResources() {
         teardown()                                   // stream loop + encoder + frame bitmap
         location.stop()                              // stop GPS updates
-        DashKeepAliveService.stop(getApplication())  // release wake + wifi locks
+        DashKeepAliveService.stop(getApplication())  // release wake + wifi + multicast locks
     }
 
     /**
@@ -627,10 +638,15 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
      * ERROR so the Dash screen still shows "Couldn't connect" + Try again.
      */
     private fun giveUp(reason: String) {
+        val hadStreamed = everStreamed
         cancelReconnectGiveup()
         userWantsConnection = false
         isBackgroundAttempt = false
-        com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
+        if (hadStreamed) {
+            com.example.northstar.dash.FastReconnectManager.notifySessionEnded()
+        } else {
+            com.example.northstar.dash.FastReconnectManager.releasePocketWakeLock()
+        }
         saveParkedBikeIfStreamed("Auto-pinned when Dash went out of range")
         stopRecording()
         session.disconnect()
@@ -735,6 +751,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         destLng = lng
         route = null
         progressM = 0.0
+        lastRouteSplitIdx = 0; lastRouteSnapPt = null; lastNextManeuver = null
         smoothEtaSec = 0.0; etaArrivalMs = 0L; displayedEtaMin = null   // fresh ETA for the new route
         voice.resetTrip()   // fresh announcements for the new route
         session.updateRouteCard(name)
@@ -751,6 +768,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         destLng = null
         route = null
         progressM = 0.0
+        lastRouteSplitIdx = 0; lastRouteSnapPt = null; lastNextManeuver = null
         offRouteSince = 0L
         panX = 0f; panY = 0f; followMode = true
         smoothEtaSec = 0.0; etaArrivalMs = 0L; displayedEtaMin = null
@@ -1003,6 +1021,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             remainingM = ns.remainingM
             lastNextManeuver = ns.nextManeuver
             lastNextTurnM = ns.nextTurnM
+            lastRouteSplitIdx = ns.splitIndex
+            lastRouteSnapPt = ns.snapped
             // Heading-aware off-route. A flyover (or its service road) runs PARALLEL to and almost
             // on top of the route, so flat GPS can sit well past the lateral threshold while the
             // rider is still effectively on the line. Distance alone then cries "off-route" and
@@ -1223,13 +1243,19 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             // SMOOTHED position (which settles and stops), not raw GPS.
             append("%.6f".format(centerLat)); append("%.6f".format(centerLng))
             append(zoom); append(panX.toInt()); append(panY.toInt())
-            append(if (headingUp) (camHeading * 10).toInt() else 0)
+            append((camHeading * 10).toInt())
+            append(if (headingUp) "H" else "N")
             append(if (tiltedView && headingUp) "T" else "F")
-            append(remainingM?.let { (it / 100).toInt() } ?: -1) // 100 m resolution to avoid jitter
+            append(remainingM?.let { (it / 25).toInt() } ?: -1)
+            append(displayedEtaMin ?: -1); append(if (recalculating) "R" else "_")
+            append(gpsStatus.ordinal)
             append(if (r != null) r.geometry.size else 0)
-            // Include the incoming-call caller so a call arriving forces an immediate redraw of the
-            // banner even when the map is static (otherwise it'd wait for the 2 s forced refresh).
-            append(com.example.northstar.media.CallInfoProvider.incomingCall.value?.takeIf { it.incoming }?.caller ?: "")
+            append(com.example.northstar.dash.DashAlertBus.active()?.title ?: "")
+            append(com.example.northstar.dash.DashAlertBus.badgeCount())
+            append(lastNextManeuver?.instruction ?: "")
+            // Include the incoming-call caller + source so cellular & WhatsApp calls redraw immediately.
+            val activeCall = com.example.northstar.media.CallInfoProvider.incomingCall.value?.takeIf { it.incoming }
+            append(activeCall?.caller ?: ""); append(activeCall?.source ?: "")
         }
         val now = System.currentTimeMillis()
         // A genuine content change (not the periodic forced refresh) is what marks the map as
@@ -1269,6 +1295,8 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             if (r != null) {
                 route = r
                 progressM = 0.0
+                lastRouteSplitIdx = 0
+                lastRouteSnapPt = null
                 offRouteSince = 0L
                 tiles.prefetchRoute(r.geometry)
                 _ui.update { it.copy(hasRoute = true, routePoints = r.geometry) }
@@ -1308,6 +1336,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(etaArrivalMs))
         else null
         val dashAlert = com.example.northstar.dash.DashAlertBus.active()
+        val callBottom = activeIncomingCallBottom(bmp.width)
+        val nextMan = if (route != null && ! _ui.value.offRoute) lastNextManeuver else null
+        val (dashManText, dashManType, dashManFlyover) = buildDashManeuverChip(nextMan, lastNextTurnM)
+
         val frame = MapRenderer.Frame(
             centerLat = centerLat,
             centerLng = centerLng,
@@ -1322,11 +1354,11 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             destLng = destLng,
             destName = _ui.value.destinationName,
             route = route?.geometry ?: emptyList(),
-            // "Take flyover"-style hint (Google-Maps-like): only for flyover steps,
-            // only when close (<= 400 m). Normal turns stay off the map (native bubble
-            // handles those) to keep the frame clean.
-            maneuverText = lastNextManeuver?.takeIf { it.flyover && lastNextTurnM <= 400.0 }
-                ?.let { "${it.instruction} · ${fmtDist(lastNextTurnM)}" },
+            routeSplitIndex = lastRouteSplitIdx,
+            routeSplitPoint = if (_ui.value.offRoute) null else lastRouteSnapPt,
+            maneuverText = dashManText,
+            maneuverType = dashManType,
+            maneuverFlyover = dashManFlyover,
             alertTitle = dashAlert?.title,
             alertLine = dashAlert?.line,
             alertBadge = com.example.northstar.dash.DashAlertBus.badgeCount(),
@@ -1337,6 +1369,7 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             etaSecondary = etaSecondary,
             gpsWeak = gpsStatus == GpsStatus.WEAK,
             gpsLost = gpsStatus == GpsStatus.LOST,
+            reservedTopCenterBottom = callBottom,
         )
         val canvas = Canvas(bmp)
         // EXPERIMENTAL MapLibre 3D base layer. Only when the rider selected it AND a snapshot
@@ -1365,81 +1398,118 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         _previewFrame.value = bmp.copy(Bitmap.Config.ARGB_8888, false)
     }
 
-    // Overlay paints — created once (never per-frame). ~50% smaller than the first cut, per feedback.
-    private val ovBg by lazy { android.graphics.Paint().apply { color = 0xCC0B0D0E.toInt(); isAntiAlias = true } }
+    /**
+     * Concise upcoming turn / flyover guidance for the top-centre dome chip:
+     * - Flyover / bridge / underpass / service-road hints appear within 550 m (amber chip),
+     *   displaying "Now" inside 25 m so guidance holds smoothly onto the entry ramp.
+     * - Real turns / roundabouts / U-turns appear within 350 m (dark chip + vector arrow).
+     */
+    private fun buildDashManeuverChip(
+        m: com.example.northstar.dash.nav.Maneuver?,
+        distM: Double,
+    ): Triple<String?, com.example.northstar.dash.nav.ManeuverType?, Boolean> {
+        if (m == null) return Triple(null, null, false)
+        if (m.flyover && distM <= 550.0) {
+            val distLabel = if (distM < 25.0) "Now" else fmtDist(distM)
+            return Triple("${m.instruction} · $distLabel", m.type, true)
+        }
+        val t = m.type
+        if (t == com.example.northstar.dash.nav.ManeuverType.CONTINUE ||
+            t == com.example.northstar.dash.nav.ManeuverType.DEPART
+        ) return Triple(null, null, false)
+
+        val threshold = if (t == com.example.northstar.dash.nav.ManeuverType.ARRIVE) 150.0 else 350.0
+        if (distM > threshold) return Triple(null, null, false)
+
+        val shortAction = when (t) {
+            com.example.northstar.dash.nav.ManeuverType.TURN_LEFT    -> "Left"
+            com.example.northstar.dash.nav.ManeuverType.TURN_RIGHT   -> "Right"
+            com.example.northstar.dash.nav.ManeuverType.SLIGHT_LEFT  -> "Keep left"
+            com.example.northstar.dash.nav.ManeuverType.SLIGHT_RIGHT -> "Keep right"
+            com.example.northstar.dash.nav.ManeuverType.SHARP_LEFT   -> "Sharp left"
+            com.example.northstar.dash.nav.ManeuverType.SHARP_RIGHT  -> "Sharp right"
+            com.example.northstar.dash.nav.ManeuverType.UTURN        -> "U-turn"
+            com.example.northstar.dash.nav.ManeuverType.ROUNDABOUT   -> "Roundabout"
+            com.example.northstar.dash.nav.ManeuverType.ARRIVE       -> "Arrive"
+            else -> return Triple(null, null, false)
+        }
+        return Triple("$shortAction · ${fmtDist(distM)}", t, false)
+    }
+
+    // Overlay paints — created once (never per-frame).
+    private val ovBg by lazy { android.graphics.Paint().apply { color = 0xEC0B0E14.toInt(); isAntiAlias = true } }
     private val ovRing by lazy { android.graphics.Paint().apply {
         color = 0xFF2E7CF6.toInt(); isAntiAlias = true
-        style = android.graphics.Paint.Style.STROKE; strokeWidth = 3f
+        style = android.graphics.Paint.Style.STROKE; strokeWidth = 2.5f
     } }
     private val ovTitle by lazy { android.graphics.Paint().apply {
-        color = android.graphics.Color.WHITE; isAntiAlias = true; textSize = 15f
+        color = android.graphics.Color.WHITE; isAntiAlias = true; textSize = 16.5f
         typeface = android.graphics.Typeface.DEFAULT_BOLD; textAlign = android.graphics.Paint.Align.CENTER } }
     private val ovSub by lazy { android.graphics.Paint().apply {
-        color = 0xFFCFCFCF.toInt(); isAntiAlias = true; textSize = 10f; textAlign = android.graphics.Paint.Align.CENTER } }
-    private val ovAccent by lazy { android.graphics.Paint().apply {
-        color = 0xFFF2A93B.toInt(); isAntiAlias = true; textSize = 10f; textAlign = android.graphics.Paint.Align.CENTER } }
+        color = 0xFF93C5FD.toInt(); isAntiAlias = true; textSize = 10.5f; isFakeBoldText = true
+        textAlign = android.graphics.Paint.Align.CENTER } }
+
+    /** Bottom Y of the incoming-call banner when active (0f when idle), so HUD pills stack cleanly below it. */
+    private fun activeIncomingCallBottom(w: Int): Float {
+        val call = com.example.northstar.media.CallInfoProvider.incomingCall.value
+        if (call == null || !call.incoming) return 0f
+        val now = System.currentTimeMillis()
+        if (callOverlaySinceMs != 0L && now - callOverlaySinceMs > 60_000) return 0f
+        val fmName = ovTitle.fontMetrics
+        val nameH = fmName.descent - fmName.ascent
+        val cardH = 18f + 13f + 4f + nameH
+        return 36f + cardH
+    }
 
     /**
-     * Draw the INCOMING-call banner onto the projected frame (the dash shows only our video while
-     * projecting, so this is the only way it's visible mid-ride). Incoming only — outgoing/active
-     * calls don't set CallInfoProvider, so this never fires for them. Now-playing has no overlay; it
-     * goes to the dash's audio screen via the 05 0d TLV instead. Centred in the round display's safe zone.
+     * Draw the INCOMING-call alert banner onto the projected frame (cellular + WhatsApp/VoIP).
+     * Clean 2-line display-only card (source eyebrow + caller name) — no UP/DN button prompts.
      */
     private fun drawDashOverlays(canvas: Canvas, w: Int, h: Int) {
         val call = com.example.northstar.media.CallInfoProvider.incomingCall.value
         if (call == null || !call.incoming) { callOverlaySinceMs = 0L; return }
-        // Failsafe TTL: if the dialer's notification-removed event never reaches us
-        // (Android drops it sometimes — "call card stays after disconnect"), stop
-        // drawing after 60s of continuous ringing. Real rings rarely exceed ~30s.
+        // Failsafe TTL: if the dialer/VoIP notification-removed event never reaches us,
+        // stop drawing after 60s of continuous ringing.
         val now = System.currentTimeMillis()
         if (callOverlaySinceMs == 0L) callOverlaySinceMs = now
         if (now - callOverlaySinceMs > 60_000) return
 
-        // The dash's native turn-circle (lower-left) is drawn by the FIRMWARE on top of our
-        // video, so a bubble placed there gets hidden behind it (confirmed on the road). Draw
-        // the call card in the clear upper-map band instead — same safe zone as the message
-        // bubbles, where nothing composites over us. Shows source (e.g. "WhatsApp call") + name.
+        val isWhatsApp = call.source.startsWith("WhatsApp", ignoreCase = true)
         val header = when {
+            call.source.isNotBlank() && call.source.endsWith("call", ignoreCase = true) ->
+                call.source.uppercase()
             call.source.isNotBlank() -> "${call.source} call".uppercase()
             else -> "INCOMING CALL"
         }
-        val name = ellipsizeOverlay(call.caller, 20)
-        val control = if (call.displayOnly) "on phone to answer" else "UP ✓ · DN ✕"
+        val name = ellipsizeOverlay(call.caller, 18)
 
-        val padH = 18f; val padV = 10f
+        // Emerald accent for WhatsApp calls; Brava blue for cellular & other calls.
+        ovRing.color = if (isWhatsApp) 0xFF25D366.toInt() else 0xFF2E7CF6.toInt()
+        ovSub.color  = if (isWhatsApp) 0xFF4ADE80.toInt() else 0xFF93C5FD.toInt()
+
+        val padH = 18f; val padV = 9f
         val fmName = ovTitle.fontMetrics
         val nameH = fmName.descent - fmName.ascent
         val subH = 13f
-        val cardW = (maxOf(ovTitle.measureText(name), ovSub.measureText(header) + 20f))
-            .coerceAtMost(w * 0.8f) + padH * 2
-        val cardH = padV * 2 + nameH + subH * 2 + 8f
+        val top = 36f // safely inside the 526×526 circular bezel arc
+        val rSafe = (w / 2f) - 16f
+        val dyCorner = (top + 16f) - (w / 2f)
+        val maxHalfW = kotlin.math.sqrt((rSafe * rSafe - dyCorner * dyCorner).coerceAtLeast(0f))
+        val maxCardW = (maxHalfW * 2f).coerceAtLeast(150f)
+        val cardW = (maxOf(ovTitle.measureText(name), ovSub.measureText(header) + 14f) + padH * 2)
+            .coerceAtMost(maxCardW)
+        val cardH = padV * 2 + subH + 4f + nameH
         val cxp = w / 2f
-        val top = 14f
         callRect.set(cxp - cardW / 2f, top, cxp + cardW / 2f, top + cardH)
         canvas.drawRoundRect(callRect, 16f, 16f, ovBg)
         canvas.drawRoundRect(callRect, 16f, 16f, ovRing)
         canvas.drawText(header, cxp, top + padV - ovSub.fontMetrics.ascent, ovSub)
         canvas.drawText(name, cxp, top + padV + subH + 4f - fmName.ascent, ovTitle)
-        canvas.drawText(control, cxp, top + cardH - padV, ovAccent)
     }
     private val callRect = android.graphics.RectF()
     @Volatile private var callOverlaySinceMs = 0L
 
     private fun ellipsizeOverlay(s: String, max: Int) = if (s.length > max) s.take(max - 1) + "…" else s
-
-    /** Answer via the dialer's own notification action (most reliable); fall back to TelecomManager. */
-    private fun answerCall(c: com.example.northstar.media.IncomingCall) {
-        val sent = c.answerIntent?.let { runCatching { it.send() }.isSuccess } ?: false
-        if (!sent) callController.answer()
-        com.example.northstar.data.RideDiagnostics.log("media", "answer (notifAction=$sent)")
-    }
-
-    /** Reject (ringing) or hang up (active) via the dialer's action; fall back to TelecomManager. */
-    private fun endCall(c: com.example.northstar.media.IncomingCall) {
-        val sent = c.declineIntent?.let { runCatching { it.send() }.isSuccess } ?: false
-        if (!sent) callController.hangup()
-        com.example.northstar.data.RideDiagnostics.log("media", "end/reject (notifAction=$sent)")
-    }
 
     // ── Monotonic route-progress tracker ────────────────────────────────────
     // Snapping to the GLOBALLY nearest segment makes the remaining distance flicker
@@ -1452,16 +1522,20 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         val remainingM: Double, val nextTurnM: Double, val heading: Float, val offRoute: Boolean,
         val snapped: GeoPoint, val snapDist: Double,
         val nextManeuver: com.example.northstar.dash.nav.Maneuver?,
+        val splitIndex: Int,
     )
 
-    private data class Match(val cum: Double, val dist: Double, val bearing: Float, val proj: GeoPoint)
+    private data class Match(
+        val cum: Double, val dist: Double, val bearing: Float, val proj: GeoPoint, val segIndex: Int,
+    )
 
     private fun trackProgress(r: Route, pos: GeoPoint): NavState {
         val geom = r.geometry
         val cum = r.cumulative
 
         fun search(lo: Double, hi: Double): Match {
-            var bestDist = Double.MAX_VALUE; var bestCum = progressM; var bestBearing = 0f; var bestProj = pos
+            var bestDist = Double.MAX_VALUE; var bestCum = progressM; var bestBearing = 0f
+            var bestProj = pos; var bestIdx = 0
             for (i in 0 until geom.size - 1) {
                 if (cum[i + 1] < lo || cum[i] > hi) continue
                 val (proj, t) = GeoPoint.projectOnSegment(pos, geom[i], geom[i + 1])
@@ -1471,9 +1545,10 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
                     bestCum = cum[i] + GeoPoint.distMeters(geom[i], geom[i + 1]) * t
                     bestBearing = GeoPoint.bearing(geom[i], geom[i + 1]).toFloat()
                     bestProj = proj
+                    bestIdx = i
                 }
             }
-            return Match(bestCum, bestDist, bestBearing, bestProj)
+            return Match(bestCum, bestDist, bestBearing, bestProj, bestIdx)
         }
 
         var m = search(progressM - 60.0, progressM + 1000.0)
@@ -1484,11 +1559,31 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
         progressM = maxOf(progressM - 25.0, m.cum) // mostly forward, tolerate small GPS slide
 
         val remaining = (r.totalMeters - progressM).coerceAtLeast(0.0)
-        val nextMan = r.maneuvers.firstOrNull {
-            it.cumulativeMeters > progressM + 1.0 && it.type != com.example.northstar.dash.nav.ManeuverType.DEPART
+
+        // Prioritize an imminent flyover/underpass/service-road step within [-35 m, +550 m]
+        // unless a hard turn lies strictly ahead of us before that flyover. This prevents
+        // intermediate "Continue straight" nodes from masking upcoming flyover guidance, and
+        // holds the chip briefly onto the entry ramp so it never blinks off at the divider.
+        val upcomingRealTurn = r.maneuvers.firstOrNull {
+            it.cumulativeMeters > progressM + 1.0 &&
+                !it.flyover &&
+                it.type != com.example.northstar.dash.nav.ManeuverType.DEPART &&
+                it.type != com.example.northstar.dash.nav.ManeuverType.CONTINUE
+        }
+        val upcomingFlyover = r.maneuvers.firstOrNull {
+            it.flyover && (it.cumulativeMeters - progressM) in -35.0..550.0
+        }
+        val nextMan = when {
+            upcomingFlyover != null &&
+                (upcomingRealTurn == null || upcomingFlyover.cumulativeMeters <= upcomingRealTurn.cumulativeMeters + 30.0) ->
+                upcomingFlyover
+            upcomingRealTurn != null -> upcomingRealTurn
+            else -> r.maneuvers.firstOrNull {
+                it.cumulativeMeters > progressM + 1.0 && it.type != com.example.northstar.dash.nav.ManeuverType.DEPART
+            }
         }
         val nextTurn = nextMan?.let { (it.cumulativeMeters - progressM).coerceAtLeast(0.0) } ?: remaining
-        return NavState(remaining, nextTurn, m.bearing, m.dist > 70.0, m.proj, m.dist, nextMan)
+        return NavState(remaining, nextTurn, m.bearing, m.dist > 70.0, m.proj, m.dist, nextMan, m.segIndex)
     }
 
     private fun updateThermal() {
@@ -1547,8 +1642,9 @@ class DashViewModel(app: Application) : AndroidViewModel(app) {
             }
             launch {
                 com.example.northstar.media.CallInfoProvider.incomingCall.collect { call ->
-                    com.example.northstar.data.RideDiagnostics.log("media", "call observed: ${call?.caller ?: "(none)"}")
-                    session.updateCall(call?.caller)
+                    val ringingCaller = call?.takeIf { it.incoming }?.caller
+                    com.example.northstar.data.RideDiagnostics.log("media", "call observed: ${ringingCaller ?: "(none)"} src=${call?.source.orEmpty()}")
+                    session.updateCall(ringingCaller)
                 }
             }
         }

@@ -108,13 +108,17 @@ class VoiceManager private constructor(context: Context) {
         if (remainingM > ARRIVE_M) arrived = false
 
         if (maneuver == null) return
+        if (!maneuver.flyover &&
+            (maneuver.type == ManeuverType.CONTINUE || maneuver.type == ManeuverType.DEPART)
+        ) return
+
         // New maneuver → reset the per-turn de-dupe flags.
         if (maneuver.cumulativeMeters != lastManeuverKey) {
             lastManeuverKey = maneuver.cumulativeMeters
             farDone = false; nearDone = false
         }
         when {
-            distanceM < NEAR_M && !nearDone -> {
+            distanceM in -35.0..NEAR_M && !nearDone -> {
                 nearDone = true; farDone = true
                 if (_mode.value == VoiceMode.FULL) speak("Now, ${turnPhrase(maneuver)}") else chime()
             }
@@ -134,17 +138,20 @@ class VoiceManager private constructor(context: Context) {
         runCatching { tone?.release() }; tone = null
     }
 
-    private fun turnPhrase(m: Maneuver): String = when (m.type) {
-        ManeuverType.TURN_LEFT    -> "turn left"
-        ManeuverType.TURN_RIGHT   -> "turn right"
-        ManeuverType.SLIGHT_LEFT  -> "keep left"
-        ManeuverType.SLIGHT_RIGHT -> "keep right"
-        ManeuverType.SHARP_LEFT   -> "sharp left"
-        ManeuverType.SHARP_RIGHT  -> "sharp right"
-        ManeuverType.UTURN        -> "make a U-turn"
-        ManeuverType.ROUNDABOUT   -> "enter the roundabout"
-        ManeuverType.ARRIVE       -> "you have arrived"
-        else                      -> "continue straight"
+    private fun turnPhrase(m: Maneuver): String {
+        if (m.flyover && m.instruction.isNotBlank()) return m.instruction.lowercase()
+        return when (m.type) {
+            ManeuverType.TURN_LEFT    -> "turn left"
+            ManeuverType.TURN_RIGHT   -> "turn right"
+            ManeuverType.SLIGHT_LEFT  -> "keep left"
+            ManeuverType.SLIGHT_RIGHT -> "keep right"
+            ManeuverType.SHARP_LEFT   -> "sharp left"
+            ManeuverType.SHARP_RIGHT  -> "sharp right"
+            ManeuverType.UTURN        -> "make a U-turn"
+            ManeuverType.ROUNDABOUT   -> "enter the roundabout"
+            ManeuverType.ARRIVE       -> "you have arrived"
+            else                      -> "continue straight"
+        }
     }
 
     private fun roundDist(m: Double): String = when {

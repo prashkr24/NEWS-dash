@@ -12,19 +12,15 @@ data class NowPlaying(
 )
 
 /**
- * A phone call surfaced from the dialer's CALL-category notification.
- * [incoming] true = ringing (overlay + answer/reject); false = active/ongoing (end only).
- * [answerIntent]/[declineIntent] are the dialer's OWN notification actions — firing them is like
- * tapping Answer / Decline, which is far more reliable than TelecomManager across OEMs. declineIntent
- * doubles as "hang up" for an active call.
+ * An incoming phone or VoIP (WhatsApp, Telegram, etc.) call surfaced from notifications.
+ * Displayed on the dash as a visual alert banner while [incoming] is true.
  */
 data class IncomingCall(
     val caller: String,
     val incoming: Boolean = true,
     val answerIntent: PendingIntent? = null,
     val declineIntent: PendingIntent? = null,
-    /** Where the call is from: null/"" = normal cellular; else app label e.g. "WhatsApp". */
+    /** Empty for cellular dialer calls; app/mode label (e.g. "WhatsApp", "WhatsApp Video") for VoIP. */
     val source: String = "",
-    /** True for VoIP calls we can only DISPLAY (no answer/reject control from the joystick). */
-    val displayOnly: Boolean = false,
+    val displayOnly: Boolean = true,
 )

@@ -38,6 +38,7 @@ class DashKeepAliveService : Service() {
         const val ACTION_START = "com.example.northstar.DASH_START"
         const val ACTION_STOP  = "com.example.northstar.DASH_STOP"
         const val ACTION_USER_DISCONNECT = "com.example.northstar.DASH_USER_DISCONNECT"
+        private const val EXTRA_FROM_BG = "from_background"
 
         @Volatile var isRunning = false
             private set
@@ -45,38 +46,167 @@ class DashKeepAliveService : Service() {
         @Volatile private var currentTitle = "WayDash — linking to Tripper Dash…"
         @Volatile private var currentText = "Connecting Wi-Fi & authenticating Dash"
 
-        fun start(context: Context) {
-            currentTitle = "WayDash — linking to Tripper Dash…"
-            currentText = "Connecting Wi-Fi & authenticating Dash"
-            val i = Intent(context, DashKeepAliveService::class.java).setAction(ACTION_START)
-            runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i)
-                else context.startService(i)
-            }.onFailure { e ->
-                Log.w(TAG, "Could not start DashKeepAliveService from current context: ${e.message}")
+        // Process-level fallback locks: held directly whenever a Dash session is active so that
+        // even if Android 12–16 blocks startForegroundService() from a background callback (before
+        // the rider grants battery-optimization exemption), CPU, low-latency Wi-Fi, and screen-off
+        // UDP broadcast reception (MulticastLock / APF bypass for 192.168.1.255:2002) still work!
+        private val fallbackLockSync = Any()
+        private var fallbackWakeLock: PowerManager.WakeLock? = null
+        private var fallbackWifiLock: WifiManager.WifiLock? = null
+        private var fallbackMulticastLock: WifiManager.MulticastLock? = null
+
+        fun acquireSessionLocks(context: Context) {
+            val appCtx = context.applicationContext
+            synchronized(fallbackLockSync) {
+                runCatching {
+                    if (fallbackWakeLock?.isHeld != true) {
+                        val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
+                        fallbackWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "northstar:dash-session").apply {
+                            setReferenceCounted(false)
+                            acquire(3 * 60 * 60 * 1000L)
+                        }
+                    }
+                }
+                runCatching {
+                    @Suppress("DEPRECATION")
+                    val wm = appCtx.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    if (fallbackWifiLock?.isHeld != true) {
+                        val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        } else {
+                            @Suppress("DEPRECATION")
+                            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                        }
+                        fallbackWifiLock = wm.createWifiLock(lockMode, "northstar:dash-session-wifi").apply {
+                            setReferenceCounted(false)
+                            acquire()
+                        }
+                    }
+                    if (fallbackMulticastLock?.isHeld != true) {
+                        // CRITICAL for screen-off pocket connection: without MulticastLock, Android's
+                        // APF hardware packet filter drops incoming 192.168.1.255:2002 UDP broadcast
+                        // auth & frame-ack packets from the Tripper Dash whenever the screen is OFF!
+                        fallbackMulticastLock = wm.createMulticastLock("northstar:dash-session-bcast").apply {
+                            setReferenceCounted(false)
+                            acquire()
+                        }
+                    }
+                }
             }
         }
 
-        fun updateStatus(title: String, text: String) {
+        fun releaseSessionLocks() {
+            synchronized(fallbackLockSync) {
+                runCatching { if (fallbackWakeLock?.isHeld == true) fallbackWakeLock?.release() }
+                runCatching { if (fallbackWifiLock?.isHeld == true) fallbackWifiLock?.release() }
+                runCatching { if (fallbackMulticastLock?.isHeld == true) fallbackMulticastLock?.release() }
+                fallbackWakeLock = null
+                fallbackWifiLock = null
+                fallbackMulticastLock = null
+            }
+        }
+
+        fun start(context: Context, fromBackground: Boolean = false): Boolean {
+            val appCtx = context.applicationContext
+            acquireSessionLocks(appCtx)
+            currentTitle = "WayDash — linking to Tripper Dash…"
+            currentText = "Connecting Wi-Fi & authenticating Dash"
+            val i = Intent(appCtx, DashKeepAliveService::class.java)
+                .setAction(ACTION_START)
+                .putExtra(EXTRA_FROM_BG, fromBackground)
+            return runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) appCtx.startForegroundService(i)
+                else appCtx.startService(i)
+                true
+            }.getOrElse { e ->
+                Log.w(TAG, "Could not start DashKeepAliveService from current context (fallback locks active): ${e.message}")
+                postFallbackNotification(appCtx)
+                false
+            }
+        }
+
+        fun updateStatus(context: Context, title: String, text: String) {
             currentTitle = title
             currentText = text
-            val svc = activeInstance ?: return
-            runCatching {
-                val nm = svc.getSystemService(NotificationManager::class.java)
-                nm.notify(NOTIF_ID, svc.buildNotification())
+            val svc = activeInstance
+            if (svc != null) {
+                runCatching {
+                    val nm = svc.getSystemService(NotificationManager::class.java)
+                    nm.notify(NOTIF_ID, buildNotificationStatic(svc))
+                }
+            } else {
+                postFallbackNotification(context.applicationContext)
             }
         }
 
         fun stop(context: Context) {
-            if (!isRunning) return
+            val appCtx = context.applicationContext
+            releaseSessionLocks()
             runCatching {
-                context.stopService(Intent(context, DashKeepAliveService::class.java))
+                if (isRunning) {
+                    appCtx.stopService(Intent(appCtx, DashKeepAliveService::class.java))
+                }
             }
+            runCatching {
+                appCtx.getSystemService(NotificationManager::class.java)?.cancel(NOTIF_ID)
+            }
+        }
+
+        private fun ensureChannelStatic(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val nm = context.getSystemService(NotificationManager::class.java) ?: return
+            if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL_ID, "Dash streaming", NotificationManager.IMPORTANCE_LOW
+                    ).apply { description = "Keeps the map streaming to the Tripper Dash" }
+                )
+            }
+        }
+
+        private fun postFallbackNotification(context: Context) {
+            runCatching {
+                ensureChannelStatic(context)
+                val nm = context.getSystemService(NotificationManager::class.java) ?: return
+                nm.notify(NOTIF_ID, buildNotificationStatic(context))
+            }
+        }
+
+        private fun buildNotificationStatic(context: Context): Notification {
+            val open = PendingIntent.getActivity(
+                context, 0,
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE,
+            )
+            val disconnectIntent = PendingIntent.getService(
+                context, 1,
+                Intent(context, DashKeepAliveService::class.java).setAction(ACTION_USER_DISCONNECT),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                Notification.Builder(context, CHANNEL_ID)
+            else
+                @Suppress("DEPRECATION") Notification.Builder(context)
+
+            val disconnectAction = Notification.Action.Builder(
+                null, "Disconnect", disconnectIntent
+            ).build()
+
+            return builder
+                .setContentTitle(currentTitle)
+                .setContentText(currentText)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setOngoing(true)
+                .setContentIntent(open)
+                .addAction(disconnectAction)
+                .build()
         }
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -87,18 +217,21 @@ class DashKeepAliveService : Service() {
                 com.example.northstar.viewmodel.DashViewModel.getInstance(applicationContext).disconnect()
                 isRunning = false
                 activeInstance = null
+                releaseSessionLocks()
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_STOP -> {
                 isRunning = false
                 activeInstance = null
+                releaseSessionLocks()
                 stopSelf()
                 return START_NOT_STICKY
             }
             else -> {
                 activeInstance = this
-                startForegroundLocks()
+                val fromBg = intent?.getBooleanExtra(EXTRA_FROM_BG, false) == true
+                startForegroundLocks(fromBg)
             }
         }
         // START_STICKY: if the OS kills us under memory pressure, restart so the
@@ -106,20 +239,24 @@ class DashKeepAliveService : Service() {
         return START_STICKY
     }
 
-    private fun startForegroundLocks() {
-        createChannel()
-        val notif = buildNotification()
+    private fun startForegroundLocks(fromBackground: Boolean) {
+        ensureChannelStatic(this)
+        val notif = buildNotificationStatic(this)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                if (hasLocationPermission()) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                val canUseLocationType = hasLocationPermission() &&
+                    (!fromBackground || com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(this))
+                if (canUseLocationType) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                }
                 try {
                     startForeground(NOTIF_ID, notif, type)
                 } catch (sec: SecurityException) {
-                    // Android 14+ may reject FOREGROUND_SERVICE_TYPE_LOCATION when started from
-                    // a closed-app background receiver if the user only granted "While using the app".
+                    // Android 14+ rejects FOREGROUND_SERVICE_TYPE_LOCATION when started from a
+                    // closed-app background callback if the user only granted "While using the app".
                     // Fall back to CONNECTED_DEVICE so the background connection still succeeds.
-                    Log.w(TAG, "FGS with LOCATION rejected from background (${sec.message}); falling back to CONNECTED_DEVICE")
+                    Log.w(TAG, "FGS with LOCATION rejected (${sec.message}); falling back to CONNECTED_DEVICE")
                     startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
                 }
             } else {
@@ -127,10 +264,10 @@ class DashKeepAliveService : Service() {
             }
             isRunning = true
             acquireLocks()
-            Log.i(TAG, "Foreground service up — wake+wifi locks held")
+            Log.i(TAG, "Foreground service up — wake+wifi+multicast locks held (fromBg=$fromBackground)")
         } catch (e: Exception) {
             isRunning = false
-            Log.e(TAG, "Foreground service start failed — continuing without locks", e)
+            Log.e(TAG, "Foreground service start failed — fallback session locks remain active", e)
             com.example.northstar.util.Telemetry.recordNonFatal(e, "DashKeepAliveService.startForegroundLocks")
             stopSelf()
         }
@@ -165,13 +302,21 @@ class DashKeepAliveService : Service() {
             setReferenceCounted(false)
             acquire()
         }
+        multicastLock = runCatching {
+            wm.createMulticastLock("northstar:dash-bcast").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
     }
 
     private fun releaseLocks() {
         runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
         runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
+        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
         wakeLock = null
         wifiLock = null
+        multicastLock = null
     }
 
     override fun onDestroy() {
@@ -180,48 +325,5 @@ class DashKeepAliveService : Service() {
         releaseLocks()
         Log.i(TAG, "Foreground service stopped — locks released")
         super.onDestroy()
-    }
-
-    private fun createChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val nm = getSystemService(NotificationManager::class.java)
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID, "Dash streaming", NotificationManager.IMPORTANCE_LOW
-                ).apply { description = "Keeps the map streaming to the Tripper Dash" }
-            )
-        }
-    }
-
-    private fun buildNotification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
-        val disconnectIntent = PendingIntent.getService(
-            this, 1,
-            Intent(this, DashKeepAliveService::class.java).setAction(ACTION_USER_DISCONNECT),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            Notification.Builder(this, CHANNEL_ID)
-        else
-            @Suppress("DEPRECATION") Notification.Builder(this)
-
-        val disconnectAction = Notification.Action.Builder(
-            null, "Disconnect", disconnectIntent
-        ).build()
-
-        return builder
-            .setContentTitle(currentTitle)
-            .setContentText(currentText)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true)
-            .setContentIntent(open)
-            .addAction(disconnectAction)
-            .build()
     }
 }

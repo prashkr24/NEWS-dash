@@ -72,4 +72,53 @@ object DeviceReadiness {
     fun locationServicesEnabled(ctx: Context): Boolean = runCatching {
         (ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager).isLocationEnabled
     }.getOrDefault(true)
+
+    /**
+     * True when Android 12+ `BLUETOOTH_CONNECT` is granted (or API < 31).
+     * Required on Android 12–16 for the OS to deliver `ACTION_ACL_CONNECTED` when the bike or
+     * helmet intercom connects while the phone is in the rider's pocket.
+     */
+    fun hasBluetoothConnectPermission(ctx: Context): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return true
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx,
+            android.Manifest.permission.BLUETOOTH_CONNECT,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /** True when Android 12+ `BLUETOOTH_SCAN` is granted (or API < 31) for BLE ignition wakeups. */
+    fun hasBluetoothScanPermission(ctx: Context): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return true
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx,
+            android.Manifest.permission.BLUETOOTH_SCAN,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /** True when both Bluetooth permissions needed for pocket ignition detection are granted. */
+    fun hasBluetoothIgnitionPermissions(ctx: Context): Boolean =
+        hasBluetoothConnectPermission(ctx) && hasBluetoothScanPermission(ctx)
+
+    /** True when `ACCESS_BACKGROUND_LOCATION` ("Allow all the time") is granted (or API < 29). */
+    fun hasBackgroundLocationPermission(ctx: Context): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return true
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx,
+            android.Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * True when all three Android 12–16 pocket auto-connect prerequisites are satisfied:
+     *  1. Unrestricted battery (`isIgnoringBatteryOptimizations`) — grants FGS background start
+     *     exemption and prevents Nothing OS / OxygenOS / One UI from freezing the app in pocket.
+     *  2. Nearby Bluetooth (`BLUETOOTH_CONNECT` + `BLUETOOTH_SCAN`) — enables `ACL_CONNECTED`
+     *     and hardware-offloaded BLE ignition wakeups to trigger screen-off Wi-Fi scans.
+     *  3. Background location (`ACCESS_BACKGROUND_LOCATION`) — enables unredacted SSID matching,
+     *     `WIFI_NETWORK_SUGGESTION_POST_CONNECTION`, and live screen-off GPS updates.
+     */
+    fun isPocketAutoConnectReady(ctx: Context): Boolean =
+        isIgnoringBatteryOptimizations(ctx) &&
+            hasBluetoothIgnitionPermissions(ctx) &&
+            hasBackgroundLocationPermission(ctx)
 }

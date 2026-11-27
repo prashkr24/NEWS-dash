@@ -91,7 +91,12 @@ object TomTomRouter {
                 val refs = ins.optJSONArray("roadNumbers")
                 if (refs != null && refs.length() > 0) roadNames.add(refs.getString(0))
                 else if (street.isNotBlank()) roadNames.add(street)
-                val elevatedHint = FlyoverDetector.hint(street, ins.optString("message"))
+                val elevatedHint = FlyoverDetector.hint(
+                    street,
+                    ins.optString("signpostText"),
+                    ins.optString("message"),
+                    ins.optString("combinedMessage"),
+                )
                 val flyover = elevatedHint != null
                 val type = mapManeuver(ins.optString("maneuver"))
                 maneuvers.add(

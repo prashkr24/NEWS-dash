@@ -1,6 +1,12 @@
 package com.example.northstar.dash
 
 import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -15,47 +21,82 @@ import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.northstar.data.BikeTrackerManager
 import com.example.northstar.data.DashPrefs
+import com.example.northstar.util.DeviceReadiness
 import com.example.northstar.viewmodel.ConnStage
 import com.example.northstar.viewmodel.DashViewModel
+import java.util.ArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Wireless Android-Auto style background auto-connect manager.
+ * Wireless Android-Auto style background & screen-off pocket auto-connect manager.
  *
- * Combines three zero-battery Android mechanisms so the phone connects to the bike's
- * Tripper Dash automatically without needing to open the app:
- *  1. [WifiNetworkSuggestion] (API 29+): Tells Android OS to automatically associate with the
- *     learned `RE_*` hotspot in the background whenever the bike ignition turns on.
- *  2. Passive [ConnectivityManager.NetworkCallback] + `NETWORK_STATE_CHANGED_ACTION`:
- *     Does NOT require background location permission. The instant the phone auto-joins the
- *     bike's `RE_*` Wi-Fi (`192.168.1.x` / `RE_*`), it wakes [DashViewModel.autoConnectFromBackground].
- *  3. Passive [WifiManager.ScanResultsCallback] (API 30+): Zero-battery listener on system
- *     Wi-Fi scans; when a fresh (<15s) `RE_*` scan result appears, it triggers auto-connect.
+ * Combines hardware-offloaded and OS-level mechanisms so the phone connects to the bike's
+ * Tripper Dash automatically while locked in the rider's pocket (screen OFF, app closed):
+ *  1. [WifiNetworkSuggestion] (API 29+, priority 100) + optional System Saved Wi-Fi
+ *     ([Settings.ACTION_WIFI_ADD_NETWORKS]): Tells Android OS & Wi-Fi PNO firmware to auto-join
+ *     the learned `RE_*` hotspot.
+ *  2. Screen-Off Wi-Fi Scan Wakeups on Bike Ignition (`ACTION_ACL_CONNECTED`, USB power, or BLE):
+ *     Android suspends periodic Wi-Fi scans when the screen is OFF. When the bike's Bluetooth,
+ *     paired JioTag/Tripper BLE, or switched USB-C port wakes the phone, we hold a bounded 45s
+ *     `PARTIAL_WAKE_LOCK` and trigger up to 4 staggered `wifi.startScan()` calls across the
+ *     Tripper Dash's 15–35s cold-boot window (strictly within Android's 4-scans/2-min quota).
+ *  3. Hardware-Offloaded BLE `PendingIntent` Filter (`SCAN_MODE_LOW_POWER`):
+ *     Runs in the Bluetooth controller chip at ~0% idle battery even when the app is killed,
+ *     waking [DashAutoConnectReceiver] when the bike's BLE radio or paired JioTag 2 is in range.
+ *  4. Passive [ConnectivityManager.NetworkCallback] + runtime BT/USB/Wi-Fi receivers (kept alive
+ *     24/7 when [com.example.northstar.media.NorthstarNotificationListener] is enabled).
  */
 object FastReconnectManager {
     private const val TAG = "FastReconnectMgr"
     private const val UNKNOWN_SSID = "<unknown ssid>"
     // Cooldown after user explicitly taps Disconnect so the app doesn't immediately re-link
-    private const val MANUAL_DISCONNECT_COOLDOWN_MS = 120_000L
-    // Cooldown after a ride session ends or gives up so residual cached scans don't re-wake the app
-    private const val SESSION_END_COOLDOWN_MS = 45_000L
-    // Maximum age of a Wi-Fi ScanResult to be considered "live" (15 seconds in microseconds)
-    private const val MAX_SCAN_RESULT_AGE_US = 15_000_000L
+    internal const val MANUAL_DISCONNECT_COOLDOWN_MS = 120_000L
+    // Cooldown after a real streaming ride ends so residual cached scans don't re-wake after key-off
+    internal const val SESSION_END_COOLDOWN_MS = 45_000L
+    // Maximum age of a Wi-Fi ScanResult to be considered "live" (20 seconds in microseconds)
+    private const val MAX_SCAN_RESULT_AGE_US = 20_000_000L
     // Minimum RSSI (dBm) to trigger auto-connect so weak ghost beacons don't wake the app
     private const val MIN_SCAN_RSSI_DBM = -82
+    // Pocket WakeLock lease covering Tripper AP boot + DHCP + RSA handshake while screen is OFF
+    private const val POCKET_WAKELOCK_MS = 45_000L
+    // Android allows 4 background startScan() calls per 2-minute window
+    private const val BG_SCAN_WINDOW_MS = 125_000L
+    private const val BG_SCAN_MAX_PER_WINDOW = 4
+    private const val BG_SCAN_MIN_INTERVAL_MS = 5_500L
+    private const val BLE_WAKE_COOLDOWN_MS = 40_000L
+    private const val BLE_PENDING_INTENT_REQ_CODE = 4709
+
+    private val BIKE_BT_NAME_TOKENS = listOf(
+        "re_", "royal", "enfield", "tripper", "guerrilla", "himalayan",
+        "bluarmor", "sena", "cardo", "intercom", "helmet",
+    )
 
     @Volatile private var scanCallbackRegistered = false
     @Volatile private var networkCallbackRegistered = false
     @Volatile private var wifiStateReceiverRegistered = false
+    @Volatile private var pocketTriggerReceiverRegistered = false
     @Volatile private var lastManualDisconnectMs = 0L
     @Volatile private var lastSessionEndMs = 0L
     @Volatile private var lastAutoTriggerMs = 0L
+    @Volatile private var lastBleWakeMs = 0L
+    @Volatile private var lastPostBtScheduleMs = 0L
     @Volatile private var lastTriggeredScanTimestampUs = 0L
     @Volatile private var lastSyncedSignature: String? = null
+    @Volatile private var lastBleFilterSignature: String? = null
+
+    private val wakeLockSync = Any()
+    private var pocketWakeLock: PowerManager.WakeLock? = null
+
+    private val bgScanSync = Any()
+    private val recentBgScanTimestampsMs = ArrayDeque<Long>()
 
     private val scanExecutor by lazy {
         Executors.newSingleThreadScheduledExecutor { r ->
@@ -63,12 +104,86 @@ object FastReconnectManager {
         }
     }
 
+    /** Staggered post-ignition check schedule covering the Tripper Dash's 15–35s Linux AP boot. */
+    internal fun buildPostIgnitionCheckDelaysSec(): LongArray =
+        longArrayOf(0L, 3L, 7L, 12L, 18L, 25L, 33L, 42L)
+
+    /** Strategic active Wi-Fi scan wakeups (<= 4 scans in 2 min) while screen is OFF in pocket. */
+    internal fun buildWifiScanTriggerDelaysSec(): LongArray =
+        longArrayOf(2L, 9L, 18L, 30L)
+
+    /** Pure gate helper (unit-testable without Android framework mocks). */
+    internal fun shouldAllowAutoConnect(
+        wirelessAutoEnabled: Boolean,
+        nowMs: Long,
+        lastManualDisconnectMs: Long,
+        lastSessionEndMs: Long,
+        lastAutoTriggerMs: Long,
+        fromForeground: Boolean,
+        forScanResult: Boolean,
+        minTriggerGapMs: Long,
+    ): Boolean {
+        if (!wirelessAutoEnabled) return false
+        if (lastManualDisconnectMs > 0L && nowMs - lastManualDisconnectMs < MANUAL_DISCONNECT_COOLDOWN_MS) {
+            return false
+        }
+        val sessionCooldown = if (forScanResult) SESSION_END_COOLDOWN_MS else 10_000L
+        if (!fromForeground && lastSessionEndMs > 0L && nowMs - lastSessionEndMs < sessionCooldown) {
+            return false
+        }
+        if (!fromForeground && lastAutoTriggerMs > 0L && nowMs - lastAutoTriggerMs < minTriggerGapMs) {
+            return false
+        }
+        return true
+    }
+
+    /** Pure rate-limiter helper ensuring we never exceed Android's 4-scans/2-min background quota. */
+    internal fun canTriggerBackgroundWifiScan(
+        nowMs: Long,
+        historyMs: MutableList<Long>,
+    ): Boolean {
+        historyMs.removeAll { nowMs - it > BG_SCAN_WINDOW_MS }
+        val last = historyMs.lastOrNull()
+        if (last != null && nowMs - last < BG_SCAN_MIN_INTERVAL_MS) return false
+        if (historyMs.size >= BG_SCAN_MAX_PER_WINDOW) return false
+        historyMs.add(nowMs)
+        return true
+    }
+
+    fun acquirePocketWakeLock(context: Context, durationMs: Long = POCKET_WAKELOCK_MS) {
+        val appCtx = context.applicationContext
+        synchronized(wakeLockSync) {
+            runCatching {
+                val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wl = pocketWakeLock ?: pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "northstar:pocket-autoconnect",
+                ).apply { setReferenceCounted(false) }.also { pocketWakeLock = it }
+                wl.acquire(durationMs)
+            }
+        }
+    }
+
+    fun releasePocketWakeLock() {
+        synchronized(wakeLockSync) {
+            runCatching {
+                if (pocketWakeLock?.isHeld == true) pocketWakeLock?.release()
+            }
+        }
+    }
+
     fun notifyManualDisconnect() {
         lastManualDisconnectMs = System.currentTimeMillis()
+        releasePocketWakeLock()
+    }
+
+    fun notifySessionStarted() {
+        releasePocketWakeLock()
     }
 
     fun notifySessionEnded() {
         lastSessionEndMs = System.currentTimeMillis()
+        releasePocketWakeLock()
     }
 
     fun clearManualDisconnectCooldown() {
@@ -76,19 +191,39 @@ object FastReconnectManager {
         lastSessionEndMs = 0L
     }
 
-    fun hasBackgroundLocationPermission(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
-        return ContextCompat.checkSelfPermission(
-            context,
-            android.Manifest.permission.ACCESS_BACKGROUND_LOCATION,
-        ) == PackageManager.PERMISSION_GRANTED
-    }
+    fun hasBackgroundLocationPermission(context: Context): Boolean =
+        DeviceReadiness.hasBackgroundLocationPermission(context)
 
     private fun wifi(context: Context): WifiManager =
         context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
     private fun cm(context: Context): ConnectivityManager =
         context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    /**
+     * Build a 1-tap system intent ([Settings.ACTION_WIFI_ADD_NETWORKS], API 30+) so the rider can
+     * save their paired `RE_*` hotspot into Android's OS-managed Saved Wi-Fi list for hardware PNO
+     * screen-off auto-join. Must NOT set `FLAG_ACTIVITY_NEW_TASK` when launched via
+     * `ActivityResultLauncher`, otherwise Android immediately returns `RESULT_CANCELED`.
+     */
+    fun createSystemSaveWifiIntent(context: Context): Intent? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val cfg = DashConfig.get(context.applicationContext)
+        val ssid = cfg.ssid.trim()
+        if (ssid.isBlank()) return null
+        val suggestion = WifiNetworkSuggestion.Builder()
+            .setSsid(ssid)
+            .apply {
+                if (cfg.password.isNotBlank()) setWpa2Passphrase(cfg.password)
+                setIsInitialAutojoinEnabled(true)
+            }
+            .build()
+        val list = ArrayList<WifiNetworkSuggestion>(1).apply { add(suggestion) }
+        val bundle = Bundle().apply {
+            putParcelableArrayList(Settings.EXTRA_WIFI_NETWORK_LIST, list)
+        }
+        return Intent(Settings.ACTION_WIFI_ADD_NETWORKS).putExtras(bundle)
+    }
 
     /**
      * Returns true if the phone is currently associated with the bike's `RE_*` Wi-Fi.
@@ -129,53 +264,132 @@ object FastReconnectManager {
         }.getOrDefault(false)
     }
 
-    /** Ensure passive OS listeners are registered without touching Wi-Fi suggestions. */
+    /** Ensure passive OS listeners and BLE ignition wake filters are registered. */
     fun ensureWatchersRegistered(context: Context) {
         val appCtx = context.applicationContext
         registerPassiveNetworkWatcher(appCtx)
         registerPassiveScanWatcher(appCtx)
+        registerRuntimePocketTriggers(appCtx)
+        syncBleIgnitionWake(appCtx)
     }
 
     /**
      * Called when the user opens or resumes [com.example.northstar.MainActivity].
-     * Ensures passive watchers are active and checks if the phone is ALREADY connected
-     * to the bike's Wi-Fi so the rider never has to tap Connect.
+     * Ensures passive watchers are active, promotes [DashKeepAliveService] if streaming started
+     * headlessly in the pocket, and checks if the phone is ALREADY connected to the bike's Wi-Fi.
      */
     fun onAppForegrounded(context: Context) {
         val appCtx = context.applicationContext
         lastSessionEndMs = 0L
         ensureWatchersRegistered(appCtx)
+        val vm = DashViewModel.getInstance(appCtx)
+        if (vm.ui.value.stage == ConnStage.STREAMING && !DashKeepAliveService.isRunning) {
+            DashKeepAliveService.start(appCtx, fromBackground = false)
+        }
         if (!isCurrentlyOnBikeWifi(appCtx)) {
             sync(appCtx, forceReset = false)
         }
         scanExecutor.execute {
             checkActiveWifiAndAutoConnect(appCtx, fromForeground = true)
-            checkScanAndAutoConnect(appCtx)
+            checkScanAndAutoConnect(appCtx, fromForeground = true)
         }
     }
 
-    /**
-     * When the bike's Bluetooth links (`ACTION_ACL_CONNECTED`), the Tripper Dash Wi-Fi AP
-     * typically finishes booting 2–10 seconds later. Schedule a few lightweight checks so
-     * we catch the Wi-Fi connection the moment it comes up.
-     */
-    fun schedulePostBluetoothChecks(context: Context) {
+    /** Debounced entry point when hardware BLE `PendingIntent` detects the bike or paired JioTag. */
+    fun onBleIgnitionSighting(context: Context) {
         val appCtx = context.applicationContext
+        if (!DashPrefs.wirelessAutoConnect(appCtx)) return
+        val now = System.currentTimeMillis()
+        if (now - lastBleWakeMs < BLE_WAKE_COOLDOWN_MS) return
+        val vm = DashViewModel.getInstance(appCtx)
+        if (vm.ui.value.stage == ConnStage.STREAMING || vm.ui.value.stage == ConnStage.AUTH) return
+        lastBleWakeMs = now
+        schedulePostBluetoothChecks(appCtx, triggerActiveScans = true)
+    }
+
+    /**
+     * When the bike's Bluetooth links (`ACTION_ACL_CONNECTED`), BLE beacon is seen, or handlebar
+     * USB power turns on, the Tripper Dash Linux Wi-Fi AP typically finishes booting 12–30 seconds
+     * later. While the phone screen is OFF in a pocket, Android suspends periodic Wi-Fi scans — so
+     * we hold a short `PARTIAL_WAKE_LOCK`, schedule passive checks over 0..42s, and fire up to 4
+     * staggered `wifi.startScan()` wakeups so the OS immediately discovers and joins `RE_*`.
+     */
+    fun schedulePostBluetoothChecks(context: Context, triggerActiveScans: Boolean = true) {
+        val appCtx = context.applicationContext
+        if (!DashPrefs.wirelessAutoConnect(appCtx)) return
+        val now = System.currentTimeMillis()
+        val alreadyScheduledRecently = now - lastPostBtScheduleMs < 8_000L
+        lastPostBtScheduleMs = now
+
+        acquirePocketWakeLock(appCtx, POCKET_WAKELOCK_MS)
         ensureWatchersRegistered(appCtx)
         if (!isCurrentlyOnBikeWifi(appCtx)) {
             sync(appCtx, forceReset = false)
         }
-        for (delaySec in longArrayOf(0L, 2L, 5L, 9L, 14L)) {
+
+        if (alreadyScheduledRecently) {
+            scanExecutor.execute {
+                checkActiveWifiAndAutoConnect(appCtx)
+                checkScanAndAutoConnect(appCtx)
+            }
+            return
+        }
+
+        for (delaySec in buildPostIgnitionCheckDelaysSec()) {
             scanExecutor.schedule({
+                val stage = DashViewModel.getInstance(appCtx).ui.value.stage
+                if (stage == ConnStage.STREAMING) return@schedule
                 checkActiveWifiAndAutoConnect(appCtx)
                 checkScanAndAutoConnect(appCtx)
             }, delaySec, TimeUnit.SECONDS)
+        }
+
+        if (triggerActiveScans) {
+            for (scanSec in buildWifiScanTriggerDelaysSec()) {
+                scanExecutor.schedule({
+                    val stage = DashViewModel.getInstance(appCtx).ui.value.stage
+                    if (stage == ConnStage.STREAMING || stage == ConnStage.AUTH) return@schedule
+                    if (isCurrentlyOnBikeWifi(appCtx)) {
+                        checkActiveWifiAndAutoConnect(appCtx)
+                        return@schedule
+                    }
+                    triggerThrottledBackgroundWifiScan(appCtx)
+                }, scanSec, TimeUnit.SECONDS)
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun triggerThrottledBackgroundWifiScan(appCtx: Context) {
+        if (!DashPrefs.wirelessAutoConnect(appCtx)) return
+        val now = System.currentTimeMillis()
+        if (now - lastManualDisconnectMs < MANUAL_DISCONNECT_COOLDOWN_MS) return
+        val w = wifi(appCtx)
+        if (!w.isWifiEnabled) return
+
+        val allowed = synchronized(bgScanSync) {
+            val list = recentBgScanTimestampsMs.toMutableList()
+            val ok = canTriggerBackgroundWifiScan(now, list)
+            if (ok) {
+                recentBgScanTimestampsMs.clear()
+                recentBgScanTimestampsMs.addAll(list)
+            }
+            ok
+        }
+        if (!allowed) return
+
+        runCatching {
+            @Suppress("DEPRECATION")
+            val started = w.startScan()
+            Log.i(TAG, "Triggered screen-off Wi-Fi scan for bike hotspot (started=$started)")
+        }.onFailure { e ->
+            Log.d(TAG, "Background startScan failed: ${e.message}")
         }
     }
 
     /**
      * Synchronize the [WifiNetworkSuggestion] registration with the user's current settings
-     * and learned `RE_*` SSID, and ensure the passive network & scan watchers are active.
+     * and learned `RE_*` SSID, and ensure the passive network, BLE, & scan watchers are active.
      *
      * IMPORTANT: On Android, calling `removeNetworkSuggestions()` while connected to a suggested
      * Wi-Fi IMMEDIATELY disconnects that Wi-Fi! Therefore this method is strictly idempotent:
@@ -190,6 +404,7 @@ object FastReconnectManager {
         if (!DashPrefs.wirelessAutoConnect(appCtx)) {
             lastSyncedSignature = null
             clearSuggestions(appCtx)
+            disarmBleIgnitionWake(appCtx)
             return "Off · manual or in-app connect only"
         }
 
@@ -200,7 +415,7 @@ object FastReconnectManager {
         }
 
         val requireInteraction = hasBackgroundLocationPermission(appCtx)
-        val signature = "$ssid|${cfg.password}|$requireInteraction"
+        val signature = "$ssid|${cfg.password}|$requireInteraction|p100"
 
         // Fast idempotency check: if we already registered this exact suggestion, don't touch WifiManager!
         if (!forceReset && lastSyncedSignature == signature) {
@@ -209,23 +424,27 @@ object FastReconnectManager {
 
         return try {
             val w = wifi(appCtx)
-            // On Android 11+ (API 30+), inspect what the OS already holds for our app.
-            // If a matching suggestion for this SSID is ALREADY registered and we aren't force-resetting,
-            // leave it untouched so we NEVER kick the phone off an active bike Wi-Fi link!
-            if (!forceReset && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val existing = runCatching { w.networkSuggestions }.getOrNull().orEmpty()
-                val alreadyHasSsid = existing.any { it.ssid == ssid }
-                if (alreadyHasSsid && (isCurrentlyOnBikeWifi(appCtx) || existing.any { it.ssid == ssid && it.isAppInteractionRequired == requireInteraction })) {
-                    lastSyncedSignature = signature
-                    Log.d(TAG, "WifiNetworkSuggestion already active for '$ssid' — skipping re-register")
-                    return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
-                }
-            }
-
             // Safety guard: never remove suggestions while actively connected to the bike's Wi-Fi
             if (!forceReset && isCurrentlyOnBikeWifi(appCtx)) {
                 Log.d(TAG, "Currently connected to bike Wi-Fi '$ssid' — deferring suggestion update")
                 return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
+            }
+
+            if (!forceReset && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val existing = runCatching { w.networkSuggestions }.getOrNull().orEmpty()
+                val exactMatch = existing.any {
+                    it.ssid == ssid && it.isAppInteractionRequired == requireInteraction && it.priority == 100
+                }
+                if (exactMatch) {
+                    lastSyncedSignature = signature
+                    Log.d(TAG, "WifiNetworkSuggestion already active for '$ssid' — skipping re-register")
+                    return "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
+                }
+                // Remove stale variant (e.g. after user upgraded location permission) while NOT on bike Wi-Fi
+                val staleForSsid = existing.filter { it.ssid == ssid }
+                if (staleForSsid.isNotEmpty()) {
+                    runCatching { w.removeNetworkSuggestions(staleForSsid) }
+                }
             }
 
             val activeSuggestions = buildSuggestions(appCtx, ssid, cfg.password)
@@ -237,7 +456,7 @@ object FastReconnectManager {
                 status == WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE
             ) {
                 lastSyncedSignature = signature
-                Log.i(TAG, "WifiNetworkSuggestion active for '$ssid' (bgLoc=$requireInteraction)")
+                Log.i(TAG, "WifiNetworkSuggestion active for '$ssid' (bgLoc=$requireInteraction, priority=100)")
                 "Active · OS auto-joins $ssid even when app is closed (0% idle battery)"
             } else {
                 Log.w(TAG, "addNetworkSuggestions status=$status")
@@ -270,14 +489,10 @@ object FastReconnectManager {
     }
 
     private fun buildSuggestions(context: Context, ssid: String, password: String): List<WifiNetworkSuggestion> {
-        // Note: Android AOSP only delivers ACTION_WIFI_NETWORK_SUGGESTION_POST_CONNECTION when
-        // setIsAppInteractionRequired(true) AND the app has ACCESS_BACKGROUND_LOCATION.
-        // If the user has not granted ACCESS_BACKGROUND_LOCATION yet, setting false lets Android
-        // silently auto-join the Wi-Fi without failing the permission check, and our passive
-        // ConnectivityManager.NetworkCallback catches the connection immediately!
         val requireInteraction = hasBackgroundLocationPermission(context)
         val suggestion = WifiNetworkSuggestion.Builder()
             .setSsid(ssid)
+            .setPriority(100)
             .setIsAppInteractionRequired(requireInteraction)
             .apply {
                 if (password.isNotBlank()) setWpa2Passphrase(password)
@@ -290,17 +505,187 @@ object FastReconnectManager {
     }
 
     private fun buildAllSuggestionVariants(ssid: String, password: String): List<WifiNetworkSuggestion> {
-        return listOf(true, false).map { interactive ->
-            WifiNetworkSuggestion.Builder()
-                .setSsid(ssid)
-                .setIsAppInteractionRequired(interactive)
-                .apply {
-                    if (password.isNotBlank()) setWpa2Passphrase(password)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        setIsInitialAutojoinEnabled(true)
+        val out = ArrayList<WifiNetworkSuggestion>(4)
+        for (interactive in listOf(true, false)) {
+            for (prio in listOf(0, 100)) {
+                out += WifiNetworkSuggestion.Builder()
+                    .setSsid(ssid)
+                    .setPriority(prio)
+                    .setIsAppInteractionRequired(interactive)
+                    .apply {
+                        if (password.isNotBlank()) setWpa2Passphrase(password)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            setIsInitialAutojoinEnabled(true)
+                        }
+                    }
+                    .build()
+            }
+        }
+        return out
+    }
+
+    /**
+     * Registers a hardware-offloaded zero-battery BLE `PendingIntent` scan (`SCAN_MODE_LOW_POWER`)
+     * with strict [ScanFilter]s matching ONLY the rider's paired JioTag 2, bonded Royal Enfield /
+     * helmet Bluetooth MACs, or paired `RE_*` Tripper unit name.
+     *
+     * Because filters are non-empty, Android's Bluetooth controller chip keeps matching while the
+     * phone screen is OFF in Deep Doze and wakes [DashAutoConnectReceiver] when beside the bike.
+     */
+    @SuppressLint("MissingPermission")
+    fun syncBleIgnitionWake(context: Context) {
+        val appCtx = context.applicationContext
+        if (!DashPrefs.wirelessAutoConnect(appCtx)) {
+            disarmBleIgnitionWake(appCtx)
+            return
+        }
+        if (!DeviceReadiness.hasBluetoothScanPermission(appCtx)) return
+        val bm = appCtx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager ?: return
+        val adapter = bm.adapter ?: return
+        if (!adapter.isEnabled) return
+        val scanner = adapter.bluetoothLeScanner ?: return
+
+        val filters = ArrayList<ScanFilter>()
+        val sigParts = ArrayList<String>()
+
+        // 1. Paired JioTag 2 MAC (from BikeTrackerManager)
+        val pairedTagMac = runCatching {
+            BikeTrackerManager.get(appCtx).state.value.pairedTagMac.trim().uppercase()
+        }.getOrDefault("")
+        if (BluetoothAdapter.checkBluetoothAddress(pairedTagMac)) {
+            filters += ScanFilter.Builder().setDeviceAddress(pairedTagMac).build()
+            sigParts += "tag:$pairedTagMac"
+        }
+
+        // 2. Bonded bike / Tripper / helmet intercom Bluetooth MACs
+        if (DeviceReadiness.hasBluetoothConnectPermission(appCtx)) {
+            val bonded = runCatching { adapter.bondedDevices }.getOrNull().orEmpty()
+            for (dev in bonded) {
+                val addr = dev.address?.uppercase().orEmpty()
+                val name = runCatching { dev.name.orEmpty() }.getOrDefault("")
+                if (BluetoothAdapter.checkBluetoothAddress(addr) &&
+                    BIKE_BT_NAME_TOKENS.any { token -> name.contains(token, ignoreCase = true) }
+                ) {
+                    filters += ScanFilter.Builder().setDeviceAddress(addr).build()
+                    sigParts += "bt:$addr"
+                }
+            }
+        }
+
+        // 3. Learned Tripper Dash unit name (RE_*)
+        val learnedSsid = DashConfig.get(appCtx).ssid.trim()
+        if (learnedSsid.isNotBlank()) {
+            filters += ScanFilter.Builder().setDeviceName(learnedSsid).build()
+            sigParts += "name:$learnedSsid"
+        }
+
+        if (filters.isEmpty()) return
+        val sig = sigParts.sorted().joinToString("|")
+        if (sig == lastBleFilterSignature) return
+
+        try {
+            val settingsBuilder = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                .setReportDelay(0L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                settingsBuilder
+                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                    .setMatchMode(ScanSettings.MATCH_MODE_STICKY)
+                    .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+            }
+            val pi = buildBleWakePendingIntent(appCtx)
+            runCatching { scanner.stopScan(pi) }
+            val err = scanner.startScan(filters, settingsBuilder.build(), pi)
+            if (err == 0) {
+                lastBleFilterSignature = sig
+                Log.i(TAG, "Armed hardware screen-off BLE ignition wake (${filters.size} filter(s): $sig)")
+            } else {
+                Log.w(TAG, "Hardware BLE PendingIntent startScan returned code=$err")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "syncBleIgnitionWake failed: ${e.message}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disarmBleIgnitionWake(appCtx: Context) {
+        if (lastBleFilterSignature == null) return
+        lastBleFilterSignature = null
+        runCatching {
+            val bm = appCtx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val scanner = bm?.adapter?.bluetoothLeScanner ?: return
+            scanner.stopScan(buildBleWakePendingIntent(appCtx))
+        }
+    }
+
+    private fun buildBleWakePendingIntent(appCtx: Context): PendingIntent {
+        val intent = Intent(appCtx, DashAutoConnectReceiver::class.java).apply {
+            action = DashAutoConnectReceiver.ACTION_BLE_BIKE_WAKE
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        return PendingIntent.getBroadcast(appCtx, BLE_PENDING_INTENT_REQ_CODE, intent, flags)
+    }
+
+    /**
+     * Registers live runtime receivers for Bluetooth ignition link, handlebar USB power, and
+     * screen wake. When [com.example.northstar.media.NorthstarNotificationListener] is enabled,
+     * the app process stays alive 24/7 — so these runtime broadcasts fire instantaneously in the
+     * pocket even on OEM ROMs (Nothing OS / OxygenOS / One UI) that delay manifest receivers!
+     */
+    private fun registerRuntimePocketTriggers(appCtx: Context) {
+        if (pocketTriggerReceiverRegistered) return
+        try {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    val act = intent?.action ?: return
+                    if (!DashPrefs.wirelessAutoConnect(appCtx)) return
+                    when (act) {
+                        BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                            Log.i(TAG, "Runtime ACL_CONNECTED → waking screen-off Wi-Fi scanner")
+                            schedulePostBluetoothChecks(appCtx, triggerActiveScans = true)
+                        }
+                        BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                            val st = intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1)
+                            if (st == BluetoothAdapter.STATE_CONNECTED) {
+                                Log.i(TAG, "Runtime BT STATE_CONNECTED → waking screen-off Wi-Fi scanner")
+                                schedulePostBluetoothChecks(appCtx, triggerActiveScans = true)
+                            }
+                        }
+                        Intent.ACTION_POWER_CONNECTED -> {
+                            Log.i(TAG, "USB/Power connected (handlebar ignition?) → checking bike Wi-Fi")
+                            schedulePostBluetoothChecks(appCtx, triggerActiveScans = true)
+                        }
+                        Intent.ACTION_USER_PRESENT,
+                        Intent.ACTION_SCREEN_ON -> {
+                            scanExecutor.execute {
+                                checkActiveWifiAndAutoConnect(appCtx)
+                                checkScanAndAutoConnect(appCtx)
+                            }
+                        }
                     }
                 }
-                .build()
+            }
+            ContextCompat.registerReceiver(
+                appCtx,
+                receiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED,
+            )
+            pocketTriggerReceiverRegistered = true
+            Log.i(TAG, "Live runtime BT/USB/screen pocket trigger receiver registered")
+        } catch (e: Exception) {
+            Log.w(TAG, "registerRuntimePocketTriggers failed: ${e.message}")
         }
     }
 
@@ -308,13 +693,6 @@ object FastReconnectManager {
      * Registers a zero-battery passive [ConnectivityManager.NetworkCallback] for Wi-Fi networks
      * (including non-internet hotspots like the Tripper Dash) plus a runtime
      * [WifiManager.NETWORK_STATE_CHANGED_ACTION] receiver.
-     *
-     * Why this is critical:
-     * When the phone connects to the bike's `RE_*` Wi-Fi automatically (either as a Saved Wi-Fi
-     * network or via [WifiNetworkSuggestion] when the app is in the background without background
-     * location permission), Android OS does NOT send `WIFI_NETWORK_SUGGESTION_POST_CONNECTION` and
-     * redacts `ScanResults`. However, [ConnectivityManager.NetworkCallback] ALWAYS fires in the
-     * background without needing background location permission!
      */
     @SuppressLint("MissingPermission")
     fun registerPassiveNetworkWatcher(context: Context) {
@@ -362,13 +740,15 @@ object FastReconnectManager {
         if (!wifiStateReceiverRegistered) {
             try {
                 val filter = IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION)
-                appCtx.registerReceiver(
+                ContextCompat.registerReceiver(
+                    appCtx,
                     object : BroadcastReceiver() {
                         override fun onReceive(ctx: Context?, intent: Intent?) {
                             scheduleNetworkCheck(appCtx, null)
                         }
                     },
                     filter,
+                    ContextCompat.RECEIVER_EXPORTED,
                 )
                 wifiStateReceiverRegistered = true
             } catch (e: Exception) {
@@ -381,10 +761,12 @@ object FastReconnectManager {
         scanExecutor.execute {
             checkActiveWifiAndAutoConnect(appCtx, candidateNetwork = network)
         }
-        // Also re-check 1.2s later once DHCP and captive-portal internet validation settle
-        scanExecutor.schedule({
-            checkActiveWifiAndAutoConnect(appCtx, candidateNetwork = network, afterValidationDelay = true)
-        }, 1200L, TimeUnit.MILLISECONDS)
+        // Re-check at 1.2s and 2.8s once Tripper DHCP and captive-portal validation settle
+        for (delayMs in longArrayOf(1200L, 2800L)) {
+            scanExecutor.schedule({
+                checkActiveWifiAndAutoConnect(appCtx, candidateNetwork = network, afterValidationDelay = true)
+            }, delayMs, TimeUnit.MILLISECONDS)
+        }
     }
 
     /**
@@ -399,18 +781,31 @@ object FastReconnectManager {
         afterValidationDelay: Boolean = false,
     ) {
         val appCtx = context.applicationContext
-        if (!DashPrefs.wirelessAutoConnect(appCtx)) return
         val now = System.currentTimeMillis()
-        if (now - lastManualDisconnectMs < MANUAL_DISCONNECT_COOLDOWN_MS) return
-        if (!fromForeground && now - lastSessionEndMs < 10_000L) return
-        if (now - lastAutoTriggerMs < 5_000L) return
+        if (!shouldAllowAutoConnect(
+                wirelessAutoEnabled = DashPrefs.wirelessAutoConnect(appCtx),
+                nowMs = now,
+                lastManualDisconnectMs = lastManualDisconnectMs,
+                lastSessionEndMs = lastSessionEndMs,
+                lastAutoTriggerMs = lastAutoTriggerMs,
+                fromForeground = fromForeground,
+                forScanResult = false,
+                minTriggerGapMs = 3_000L,
+            )
+        ) return
 
         val w = wifi(appCtx)
         if (!w.isWifiEnabled) return
 
         val vm = DashViewModel.getInstance(appCtx)
         val stage = vm.ui.value.stage
-        if (stage == ConnStage.STREAMING || stage == ConnStage.AUTH || stage == ConnStage.WIFI) return
+        if (stage == ConnStage.STREAMING || stage == ConnStage.AUTH) return
+        // If already in ConnStage.WIFI (waiting passively for DHCP/association), nudge the manager
+        // to adopt any newly ready network immediately instead of waiting for its next poll tick!
+        if (stage == ConnStage.WIFI) {
+            vm.nudgeBackgroundWifiCheck()
+            return
+        }
 
         val cfg = DashConfig.get(appCtx)
         val connMgr = cm(appCtx)
@@ -439,7 +834,11 @@ object FastReconnectManager {
                     readableSsid.startsWith(cfg.ssidPrefix)
                 if (isMatch) {
                     lastAutoTriggerMs = now
-                    if (cfg.ssid.isBlank()) cfg.ssid = readableSsid
+                    acquirePocketWakeLock(appCtx)
+                    if (cfg.ssid.isBlank()) {
+                        cfg.ssid = readableSsid
+                        sync(appCtx, forceReset = false)
+                    }
                     Log.i(TAG, "Phone is connected to bike Wi-Fi '$readableSsid' (net=$net) → auto-starting Dash session")
                     vm.autoConnectFromBackground()
                     return
@@ -447,13 +846,9 @@ object FastReconnectManager {
                 continue
             }
 
-            // If SSID is redacted ("<unknown ssid>") because we are in the background without
-            // ACCESS_BACKGROUND_LOCATION, we can still identify the bike's Wi-Fi if:
-            //  1. We already know the rider's `cfg.ssid` from their first pairing, AND
-            //  2. The Wi-Fi network has NO internet (!NET_CAPABILITY_VALIDATED), AND
-            //  3. Its IPv4 address / gateway is on the Tripper Dash subnet (192.168.1.x or 192.168.43.x).
-            // We wait for `afterValidationDelay` (1.2s) or `fromForeground` so a home 192.168.1.x
-            // Wi-Fi router has time to validate internet and be skipped.
+            // Redacted SSID fallback ("<unknown ssid>" in background without ACCESS_BACKGROUND_LOCATION):
+            // Wait for `afterValidationDelay` (1.2s+) or `fromForeground` so a home 192.168.1.x router
+            // validates internet and is skipped.
             if (cfg.ssid.isNotBlank() &&
                 (afterValidationDelay || fromForeground) &&
                 !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
@@ -476,6 +871,7 @@ object FastReconnectManager {
 
                 if (subnetMatch) {
                     lastAutoTriggerMs = now
+                    acquirePocketWakeLock(appCtx)
                     Log.i(TAG, "Phone joined non-internet Dash subnet (192.168.1.x) for '${cfg.ssid}' → auto-starting Dash session")
                     vm.autoConnectFromBackground()
                     return
@@ -486,8 +882,6 @@ object FastReconnectManager {
 
     /**
      * Registers a zero-battery passive listener on OS Wi-Fi scans (API 30+).
-     * Does NOT trigger any Wi-Fi scans itself — only inspects results when Android OS
-     * performs its normal system scan.
      */
     @SuppressLint("MissingPermission")
     fun registerPassiveScanWatcher(context: Context) {
@@ -506,20 +900,27 @@ object FastReconnectManager {
                 }
             )
             scanCallbackRegistered = true
-            Log.i(TAG, "Passive Wi-Fi scan watcher registered (zero active polling)")
+            Log.i(TAG, "Passive Wi-Fi scan watcher registered")
         } catch (e: Exception) {
             Log.w(TAG, "registerScanResultsCallback failed: ${e.message}")
         }
     }
 
     @SuppressLint("MissingPermission")
-    fun checkScanAndAutoConnect(context: Context) {
+    fun checkScanAndAutoConnect(context: Context, fromForeground: Boolean = false) {
         val appCtx = context.applicationContext
-        if (!DashPrefs.wirelessAutoConnect(appCtx)) return
         val now = System.currentTimeMillis()
-        if (now - lastManualDisconnectMs < MANUAL_DISCONNECT_COOLDOWN_MS) return
-        if (now - lastSessionEndMs < SESSION_END_COOLDOWN_MS) return
-        if (now - lastAutoTriggerMs < 12_000L) return
+        if (!shouldAllowAutoConnect(
+                wirelessAutoEnabled = DashPrefs.wirelessAutoConnect(appCtx),
+                nowMs = now,
+                lastManualDisconnectMs = lastManualDisconnectMs,
+                lastSessionEndMs = lastSessionEndMs,
+                lastAutoTriggerMs = lastAutoTriggerMs,
+                fromForeground = fromForeground,
+                forScanResult = true,
+                minTriggerGapMs = 10_000L,
+            )
+        ) return
 
         val cfg = DashConfig.get(appCtx)
         val w = wifi(appCtx)
@@ -529,14 +930,11 @@ object FastReconnectManager {
         var newestMatchTimestampUs = 0L
 
         val foundSsid = try {
-            // Filter strictly to FRESH scan results (< 15s old) with strong signal (>= -82 dBm).
-            // This prevents Android's cached scan list from re-triggering auto-connect after
-            // the rider has already turned the bike key OFF.
             val freshResults = w.scanResults.filter { sr ->
                 val ageUs = nowElapsedUs - sr.timestamp
                 ageUs in 0..MAX_SCAN_RESULT_AGE_US &&
                     sr.level >= MIN_SCAN_RSSI_DBM &&
-                    sr.timestamp > lastTriggeredScanTimestampUs
+                    (fromForeground || sr.timestamp > lastTriggeredScanTimestampUs)
             }
             val matched = if (cfg.ssid.isNotBlank()) {
                 freshResults.firstOrNull { it.SSID?.trim('"') == cfg.ssid }
@@ -554,14 +952,25 @@ object FastReconnectManager {
             null
         } ?: return
 
+        if (cfg.ssid.isBlank()) {
+            cfg.ssid = foundSsid
+            sync(appCtx, forceReset = false)
+        } else if (!isCurrentlyOnBikeWifi(appCtx)) {
+            // Ensure suggestion is synced so OS WifiConnectivityManager auto-associates immediately
+            sync(appCtx, forceReset = false)
+        }
+
         val vm = DashViewModel.getInstance(appCtx)
         val stage = vm.ui.value.stage
         if (stage == ConnStage.OFFLINE || stage == ConnStage.ERROR) {
             lastAutoTriggerMs = now
             lastTriggeredScanTimestampUs = newestMatchTimestampUs
-            Log.i(TAG, "Fresh bike hotspot '$foundSsid' detected (<15s old) → triggering background auto-connect")
-            if (cfg.ssid.isBlank()) cfg.ssid = foundSsid
+            acquirePocketWakeLock(appCtx)
+            Log.i(TAG, "Fresh bike hotspot '$foundSsid' detected (<20s old) → triggering background auto-connect")
             vm.autoConnectFromBackground()
+        } else if (stage == ConnStage.WIFI) {
+            vm.nudgeBackgroundWifiCheck()
         }
     }
 }
+

@@ -14,6 +14,7 @@ object DashPrefs {
     private const val KEY_TILTED_VIEW = "tilted_view"
     private const val KEY_UI_VERSION = "ui_version"
     private const val KEY_UNITS_KM = "units_km"
+    private const val KEY_WIFI_SAVED_SSID = "wifi_saved_ssid"
 
     private const val ZOOM_MIN = 11
     private const val ZOOM_MAX = 20
@@ -70,5 +71,13 @@ object DashPrefs {
 
     fun setUnitsKm(context: Context, km: Boolean) {
         prefs(context).edit().putBoolean(KEY_UNITS_KM, km).apply()
+    }
+
+    /** SSID saved to Android's OS Saved Wi-Fi list via ACTION_WIFI_ADD_NETWORKS (empty if not yet saved). */
+    fun wifiSavedSsid(context: Context): String =
+        prefs(context).getString(KEY_WIFI_SAVED_SSID, "") ?: ""
+
+    fun setWifiSavedSsid(context: Context, ssid: String) {
+        prefs(context).edit().putString(KEY_WIFI_SAVED_SSID, ssid.trim()).apply()
     }
 }

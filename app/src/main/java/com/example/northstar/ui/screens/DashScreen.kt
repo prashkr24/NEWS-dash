@@ -54,6 +54,10 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
     val requestedPermissions = remember {
         buildList {
             addAll(essentialPermissions)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_SCAN)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 add(Manifest.permission.POST_NOTIFICATIONS)
         }.toTypedArray()
@@ -97,6 +101,7 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
+        com.example.northstar.dash.FastReconnectManager.sync(context)
         val essentialOk = essentialPermissions.all { results[it] == true }
         if (essentialOk) connectWithBackgroundCheck()
     }
@@ -331,14 +336,66 @@ fun DashScreen(vm: DashViewModel = viewModel(), onOpenSettings: () -> Unit = {})
             ) {
                 val dashFrame = previewFrame
                 when {
-                    streaming && dashFrame != null -> androidx.compose.foundation.Image(
-                        bitmap = dashFrame.asImageBitmap(),
-                        contentDescription = "Live dash frame",
-                        // The dash is round and shows the centred circle of the 526×300 frame;
-                        // Crop into the circular viewport reproduces exactly that.
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    streaming && dashFrame != null -> Column(Modifier.fillMaxSize()) {
+                        // Exact hardware geometry: our 526×300 stream fills the upper 300/526 of the
+                        // round Tripper TFT; the lower 226/526 is the dash's native gold/dark cluster.
+                        androidx.compose.foundation.Image(
+                            bitmap = dashFrame.asImageBitmap(),
+                            contentDescription = "Live dash frame",
+                            contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                            modifier = Modifier.fillMaxWidth().weight(300f),
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(226f)
+                                .background(Color(0xFF0E1013)),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(Color(0xFFAB8B4A), Color(0xFF8B6E34))
+                                        )
+                                    )
+                                    .padding(horizontal = 24.dp, vertical = 6.dp),
+                            ) {
+                                Text(
+                                    ui.destinationName ?: "WayDash",
+                                    color = Color(0xFFFFF8EA),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                ui.remainingKm?.let { km ->
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        if (km < 1.0) "${(km * 1000).toInt()} m" else "%.1f km".format(km),
+                                        color = Color(0xFFFFF8EA),
+                                        fontSize = 11.5.sp,
+                                        fontFamily = GeistMonoFamily,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
+                            }
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.fillMaxSize().padding(bottom = 12.dp),
+                            ) {
+                                Text(
+                                    "TRIPPER CLUSTER · z${ui.mapZoom}",
+                                    color = TextLo,
+                                    fontSize = 10.sp,
+                                    fontFamily = GeistMonoFamily,
+                                )
+                            }
+                        }
+                    }
                     // Streaming but the first dash frame hasn't been produced yet: show a lightweight
                     // placeholder, NOT the MapLibre map. The off-screen encoder is spinning up here,
                     // and instantiating + tearing down MapLibre's native MapView in this exact window

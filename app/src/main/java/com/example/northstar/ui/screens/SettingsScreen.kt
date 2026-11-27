@@ -131,6 +131,68 @@ fun SettingsScreen(
         }
 
         SectionLabel("Wireless Auto-Connect & Dash Link")
+        val lifecycleOwner = LocalLifecycleOwner.current
+        var batteryUnrestricted by remember {
+            mutableStateOf(com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx))
+        }
+        var btPermOk by remember {
+            mutableStateOf(com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx))
+        }
+        var bgLocOk by remember {
+            mutableStateOf(com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx))
+        }
+        var wifiSavedSsid by remember {
+            mutableStateOf(com.example.northstar.data.DashPrefs.wifiSavedSsid(ctx))
+        }
+        var mediaGranted by remember { mutableStateOf(com.example.northstar.media.MediaInfoProvider.isAccessGranted(ctx)) }
+
+        val batteryExemptLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) {
+            batteryUnrestricted = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx)
+        }
+        val btPermSettingsLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) {
+            btPermOk = com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx)
+            com.example.northstar.dash.FastReconnectManager.sync(ctx)
+        }
+        val bgLocSettingsLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) {
+            bgLocOk = com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx)
+            com.example.northstar.dash.FastReconnectManager.sync(ctx)
+        }
+        val saveSystemWifiLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { res ->
+            if (res.resultCode == android.app.Activity.RESULT_OK && dashUi.ssid.isNotBlank()) {
+                com.example.northstar.data.DashPrefs.setWifiSavedSsid(ctx, dashUi.ssid)
+                wifiSavedSsid = dashUi.ssid
+            }
+        }
+
+        DisposableEffect(lifecycleOwner) {
+            val obs = LifecycleEventObserver { _, e ->
+                if (e == Lifecycle.Event.ON_RESUME) {
+                    batteryUnrestricted = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx)
+                    btPermOk = com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx)
+                    bgLocOk = com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx)
+                    wifiSavedSsid = com.example.northstar.data.DashPrefs.wifiSavedSsid(ctx)
+                    mediaGranted = com.example.northstar.media.MediaInfoProvider.isAccessGranted(ctx)
+                    // Re-sync background Wi-Fi & BLE watcher once permissions / notification access change
+                    com.example.northstar.dash.FastReconnectManager.sync(ctx)
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(obs)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+        }
+
+        val pocketReady = batteryUnrestricted && btPermOk && bgLocOk
+        val canSaveSystemWifi = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            dashUi.ssid.isNotBlank()
+        val isSavedToSystemWifi = canSaveSystemWifi && wifiSavedSsid == dashUi.ssid
+
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
             SettingRow(
                 NorthstarIcons.Wifi,
@@ -151,8 +213,8 @@ fun SettingsScreen(
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
             SettingRow(
                 NorthstarIcons.Zap,
-                "Wireless Auto-Connect (Background)",
-                "Android Auto style · joins RE_* & streams without opening the app",
+                "Wireless Auto-Connect (Pocket)",
+                "Android Auto style · wakes on ignition & streams with screen off",
                 control = {
                     NorthstarToggle(wirelessAuto) {
                         wirelessAuto = it
@@ -161,6 +223,74 @@ fun SettingsScreen(
                     }
                 },
             )
+            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+            SettingRow(
+                NorthstarIcons.Bt,
+                "Screen-Off Pocket Readiness",
+                sub = when {
+                    pocketReady -> "Ready · Unrestricted battery, Bluetooth wake & all-time GPS active"
+                    !batteryUnrestricted -> "Tap to set Battery to Unrestricted (stops OS pocket freeze)"
+                    !btPermOk -> "Tap to allow Nearby Devices (wakes Wi‑Fi when bike BT links)"
+                    else -> "Tap to set Location to 'Allow all the time' for closed-app link"
+                },
+                control = {
+                    NorthstarChip(
+                        if (pocketReady) "Ready" else "Fix",
+                        if (pocketReady) ChipTone.Gold else ChipTone.Warn,
+                        dot = true,
+                    )
+                },
+                onClick = if (pocketReady) null else {
+                    {
+                        when {
+                            !batteryUnrestricted -> runCatching {
+                                batteryExemptLauncher.launch(com.example.northstar.util.DeviceReadiness.batteryExemptionIntent(ctx))
+                            }.onFailure {
+                                runCatching { ctx.startActivity(com.example.northstar.util.DeviceReadiness.appSettingsIntent(ctx)) }
+                            }
+                            !btPermOk && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S -> {
+                                btPermSettingsLauncher.launch(
+                                    arrayOf(
+                                        android.Manifest.permission.BLUETOOTH_CONNECT,
+                                        android.Manifest.permission.BLUETOOTH_SCAN,
+                                    )
+                                )
+                            }
+                            !bgLocOk && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q -> {
+                                val hasFine = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    ctx, android.Manifest.permission.ACCESS_FINE_LOCATION
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (hasFine) {
+                                    bgLocSettingsLauncher.launch(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                                } else {
+                                    runCatching { ctx.startActivity(com.example.northstar.util.DeviceReadiness.appSettingsIntent(ctx)) }
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            if (canSaveSystemWifi) {
+                NorthstarDivider(Modifier.padding(horizontal = 6.dp))
+                SettingRow(
+                    NorthstarIcons.Wifi,
+                    "Save ${dashUi.ssid} to System Wi‑Fi",
+                    if (isSavedToSystemWifi) "Saved · Android hardware PNO auto-joins ${dashUi.ssid} with screen off"
+                    else "Tap to add ${dashUi.ssid} to Android Saved Networks for instant pocket auto-join",
+                    control = {
+                        NorthstarChip(
+                            if (isSavedToSystemWifi) "Saved" else "Save",
+                            if (isSavedToSystemWifi) ChipTone.Gold else ChipTone.Neutral,
+                            dot = isSavedToSystemWifi,
+                        )
+                    },
+                    onClick = {
+                        com.example.northstar.dash.FastReconnectManager.createSystemSaveWifiIntent(ctx)?.let { intent ->
+                            runCatching { saveSystemWifiLauncher.launch(intent) }
+                        }
+                    },
+                )
+            }
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))
             SettingRow(
                 NorthstarIcons.Sync,
@@ -192,33 +322,12 @@ fun SettingsScreen(
         }
 
         SectionLabel("Media & calls on dash")
-        val lifecycleOwner = LocalLifecycleOwner.current
-        fun answerGranted() = androidx.core.content.ContextCompat.checkSelfPermission(
-            ctx, android.Manifest.permission.ANSWER_PHONE_CALLS,
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        var mediaGranted by remember { mutableStateOf(com.example.northstar.media.MediaInfoProvider.isAccessGranted(ctx)) }
-        var callAnswerGranted by remember { mutableStateOf(answerGranted()) }
-        DisposableEffect(lifecycleOwner) {
-            val obs = LifecycleEventObserver { _, e ->
-                if (e == Lifecycle.Event.ON_RESUME) {
-                    mediaGranted = com.example.northstar.media.MediaInfoProvider.isAccessGranted(ctx)
-                    callAnswerGranted = answerGranted()
-                    // Re-sync background Wi-Fi watcher once notification listener is granted
-                    com.example.northstar.dash.FastReconnectManager.sync(ctx)
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(obs)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-        }
-        val callPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-            callAnswerGranted = it
-        }
         NorthstarCard(modifier = Modifier.fillMaxWidth(), padding = 6.dp) {
             SettingRow(
                 NorthstarIcons.Zap,
-                "Now playing, calls & background wake",
-                if (mediaGranted) "Enabled · song info, caller & 24/7 background auto-connect active"
-                else "Tap to allow notification access (also enables 24/7 background auto-link)",
+                "Now playing, WhatsApp/phone calls & 24/7 wake",
+                if (mediaGranted) "Enabled · song info, phone/WhatsApp caller & 24/7 pocket auto-connect active"
+                else "Tap to allow notification access (enables call alerts & 24/7 pocket auto-link)",
                 control = {
                     NorthstarChip(
                         if (mediaGranted) "On" else "Enable",
@@ -227,22 +336,6 @@ fun SettingsScreen(
                 },
                 onClick = if (mediaGranted) null else {
                     { runCatching { ctx.startActivity(com.example.northstar.media.MediaInfoProvider.accessSettingsIntent()) } }
-                },
-            )
-            NorthstarDivider(Modifier.padding(horizontal = 6.dp))
-            SettingRow(
-                NorthstarIcons.Bt,
-                "Answer calls from joystick",
-                if (callAnswerGranted) "Enabled · UP answers, DOWN rejects"
-                else "Tap to allow answering/rejecting calls",
-                control = {
-                    NorthstarChip(
-                        if (callAnswerGranted) "On" else "Enable",
-                        if (callAnswerGranted) ChipTone.Gold else ChipTone.Off, dot = true,
-                    )
-                },
-                onClick = if (callAnswerGranted) null else {
-                    { callPermLauncher.launch(android.Manifest.permission.ANSWER_PHONE_CALLS) }
                 },
             )
             NorthstarDivider(Modifier.padding(horizontal = 6.dp))

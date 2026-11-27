@@ -179,11 +179,13 @@ class BikeTrackerManager private constructor(private val context: Context) {
             pairedTagName = cleanName,
             liveTag = live,
         )
+        com.example.northstar.dash.FastReconnectManager.syncBleIgnitionWake(context)
     }
 
     fun unpairBleTag() {
         prefs.edit().remove(KEY_TAG_MAC).apply()
         _state.value = _state.value.copy(pairedTagMac = "", liveTag = null)
+        com.example.northstar.dash.FastReconnectManager.syncBleIgnitionWake(context)
     }
 
     private fun saveParked(loc: ParkedBikeLocation) {

@@ -13,25 +13,26 @@ package com.example.northstar.dash.nav
  */
 object FlyoverDetector {
 
-    /** Hint label for an elevated/bridge step, or null when the name implies neither. */
+    /** Hint label for an elevated/bridge/underpass/service-road step, or null when none applies. */
     fun hint(vararg names: String?): String? {
         val text = names.filterNotNull().joinToString(" ").lowercase()
         if (text.isBlank()) return null
         return when {
-            UNDERPASS.containsMatchIn(text) -> "Keep to the underpass"
-            FLYOVER.containsMatchIn(text)   -> "Take the flyover"
-            BRIDGE.containsMatchIn(text)    -> "Take the bridge"
+            SERVICE_RD.containsMatchIn(text) -> "Keep to service road"
+            UNDERPASS.containsMatchIn(text)  -> "Keep to the underpass"
+            FLYOVER.containsMatchIn(text)    -> "Take the flyover"
+            BRIDGE.containsMatchIn(text)     -> "Take the bridge"
             else -> null
         }
     }
 
-    /** True when [hint] would produce any elevated-road guidance. */
+    /** True when [hint] would produce any grade-separated road guidance. */
     fun isElevated(vararg names: String?): Boolean = hint(*names) != null
 
     // "flyover", "fly over", "fly-over", "overbridge", "over bridge", "ROB",
-    // "elevated" (Elevated Expressway/Corridor/Tollway), "viaduct"
+    // "elevated" (Elevated Expressway/Corridor/Tollway), "viaduct", "overpass"
     private val FLYOVER = Regex(
-        "\\bfly[ -]?over\\b|\\bover[ -]?bridge\\b|\\brob\\b|\\belevated\\b|\\bviaduct\\b"
+        "\\bfly[ -]?over\\b|\\bover[ -]?bridge\\b|\\bover[ -]?pass\\b|\\brob\\b|\\belevated\\b|\\bviaduct\\b"
     )
 
     // "bridge", plus the Indian map abbreviations the user has seen: "brg", "br." / "br"
@@ -39,8 +40,13 @@ object FlyoverDetector {
         "\\bbridge\\b|\\bbrg\\b|\\bbr\\.?\\b"
     )
 
-    // "RUB" (road under bridge), "underpass" — the opposite of a flyover
+    // "RUB" (road under bridge), "underpass", "subway" (e.g. Andheri Subway), "tunnel"
     private val UNDERPASS = Regex(
-        "\\brub\\b|\\bunder[ -]?pass\\b|\\bunder[ -]?bridge\\b"
+        "\\brub\\b|\\bunder[ -]?pass\\b|\\bunder[ -]?bridge\\b|\\bsub[ -]?way\\b|\\btunnel\\b"
+    )
+
+    // Explicit parallel ground slip/service road alongside an arterial highway/flyover
+    private val SERVICE_RD = Regex(
+        "\\bservice[ -]?r(?:oa)?d\\b|\\bslip[ -]?r(?:oa)?d\\b"
     )
 }

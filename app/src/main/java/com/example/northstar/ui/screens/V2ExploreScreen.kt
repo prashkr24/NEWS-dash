@@ -73,6 +73,18 @@ fun V2ExploreScreen(
             add(Manifest.permission.ACCESS_FINE_LOCATION)
         }.toTypedArray()
     }
+    val fullConnectPermissions = remember {
+        buildList {
+            addAll(essentialPermissions)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }.toTypedArray()
+    }
     var hasLocPerm by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) ==
@@ -80,21 +92,87 @@ fun V2ExploreScreen(
         )
     }
     var hasBgLocPerm by remember {
-        mutableStateOf(com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx))
+        mutableStateOf(com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx))
     }
+    var hasBtPerm by remember {
+        mutableStateOf(com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx))
+    }
+    var batteryOk by remember {
+        mutableStateOf(com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx))
+    }
+    var savedSystemSsid by remember {
+        mutableStateOf(DashPrefs.wifiSavedSsid(ctx))
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasLocPerm = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                    PackageManager.PERMISSION_GRANTED
+                hasBgLocPerm = com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx)
+                hasBtPerm = com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx)
+                batteryOk = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx)
+                savedSystemSsid = DashPrefs.wifiSavedSsid(ctx)
+                com.example.northstar.dash.FastReconnectManager.sync(ctx)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    val batteryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        batteryOk = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx)
+    }
+    val connectBatteryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        batteryOk = com.example.northstar.util.DeviceReadiness.isIgnoringBatteryOptimizations(ctx)
+        dashViewModel.connect()
+    }
+    fun connectWithPocketReadiness() {
+        if (!batteryOk && !com.example.northstar.util.DeviceReadiness.batteryExemptionAsked(ctx)) {
+            com.example.northstar.util.DeviceReadiness.markBatteryExemptionAsked(ctx)
+            val launched = runCatching {
+                connectBatteryLauncher.launch(com.example.northstar.util.DeviceReadiness.batteryExemptionIntent(ctx))
+            }.isSuccess
+            if (!launched) dashViewModel.connect()
+        } else {
+            dashViewModel.connect()
+        }
+    }
+
     val bgLocLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        hasBgLocPerm = granted || com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx)
+        hasBgLocPerm = granted || com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx)
         com.example.northstar.dash.FastReconnectManager.sync(ctx)
+    }
+    val btPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        hasBtPerm = com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx)
+        com.example.northstar.dash.FastReconnectManager.sync(ctx)
+    }
+    val saveWifiLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK && dashUi.ssid.isNotBlank()) {
+            DashPrefs.setWifiSavedSsid(ctx, dashUi.ssid)
+            savedSystemSsid = dashUi.ssid
+        }
     }
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { res ->
         hasLocPerm = res[Manifest.permission.ACCESS_FINE_LOCATION] == true
-        hasBgLocPerm = com.example.northstar.dash.FastReconnectManager.hasBackgroundLocationPermission(ctx)
+        hasBgLocPerm = com.example.northstar.util.DeviceReadiness.hasBackgroundLocationPermission(ctx)
+        hasBtPerm = com.example.northstar.util.DeviceReadiness.hasBluetoothIgnitionPermissions(ctx)
+        com.example.northstar.dash.FastReconnectManager.sync(ctx)
         if (essentialPermissions.all { res[it] == true }) {
-            dashViewModel.connect()
+            connectWithPocketReadiness()
         }
     }
 
@@ -184,8 +262,8 @@ fun V2ExploreScreen(
                                 val allGranted = essentialPermissions.all {
                                     ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED
                                 }
-                                if (allGranted) dashViewModel.connect()
-                                else permLauncher.launch(essentialPermissions)
+                                if (allGranted && hasBtPerm) connectWithPocketReadiness()
+                                else permLauncher.launch(fullConnectPermissions)
                             },
                             icon = NorthstarIcons.Wifi,
                             variant = BtnVariant.Secondary,
@@ -196,8 +274,48 @@ fun V2ExploreScreen(
             }
         }
 
-        // ── 1b. One-Tap Closed-App Auto-Connect Permission Banner ─────────────
-        if (wirelessAuto && hasLocPerm && !hasBgLocPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // ── 1b. One-Tap Pocket (Screen-Off) Auto-Connect Readiness Banner ─────
+        val needsWifiSystemSave = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            dashUi.ssid.isNotBlank() && savedSystemSsid != dashUi.ssid
+        val pocketPrompt: Triple<String, String, () -> Unit>? = when {
+            !wirelessAuto -> null
+            !batteryOk -> Triple(
+                "Allow Screen-Off Pocket Streaming",
+                "Tap to set WayDash battery to Unrestricted so Android doesn't freeze background Wi-Fi & Dash link while locked in your pocket.",
+            ) {
+                runCatching {
+                    batteryLauncher.launch(com.example.northstar.util.DeviceReadiness.batteryExemptionIntent(ctx))
+                }.onFailure {
+                    runCatching { ctx.startActivity(com.example.northstar.util.DeviceReadiness.appSettingsIntent(ctx)) }
+                }
+            }
+            !hasBtPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> Triple(
+                "Enable Bike Ignition Wakeup (Bluetooth)",
+                "Tap to allow Nearby Devices so your bike or helmet Bluetooth wakes Wi-Fi scanning while your phone screen is off.",
+            ) {
+                btPermLauncher.launch(
+                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
+                )
+            }
+            hasLocPerm && !hasBgLocPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> Triple(
+                "Enable Closed-App Pocket Auto-Connect",
+                "Tap to set Location to 'Allow all the time' so WayDash auto-joins ${dashUi.ssid.ifBlank { "RE_*" }} & streams GPS without unlocking your phone.",
+            ) {
+                bgLocLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            }
+            needsWifiSystemSave -> Triple(
+                "Save ${dashUi.ssid} for Instant Pocket Auto-Join",
+                "Add your Tripper Dash hotspot to Android Saved Wi-Fi so hardware screen-off scan joins it automatically.",
+            ) {
+                com.example.northstar.dash.FastReconnectManager.createSystemSaveWifiIntent(ctx)?.let { intent ->
+                    runCatching { saveWifiLauncher.launch(intent) }
+                }
+            }
+            else -> null
+        }
+
+        if (pocketPrompt != null) {
+            val (bannerTitle, bannerBody, bannerAction) = pocketPrompt
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -207,21 +325,19 @@ fun V2ExploreScreen(
                     .clip(RoundedCornerShape(14.dp))
                     .background(Surf1)
                     .border(1.dp, Brava, RoundedCornerShape(14.dp))
-                    .clickable {
-                        bgLocLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                    }
+                    .clickable { bannerAction() }
                     .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 Column(Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
-                        "Enable Closed-App Auto-Connect",
+                        bannerTitle,
                         color = BravaBright,
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = GeistFamily,
                     )
                     Text(
-                        "Tap to set Location to 'Allow all the time' so WayDash auto-starts & streams GPS when your phone connects to bike Wi-Fi in your pocket.",
+                        bannerBody,
                         color = TextMid,
                         fontSize = 11.sp,
                         fontFamily = GeistFamily,
